@@ -4,6 +4,7 @@ const Database = require('better-sqlite3');
 const {
   DEFAULT_AUTOPOST_COUNT,
   normalizeAutopostCount,
+  normalizeAutopostMode,
   normalizeAutopostFilters
 } = require('../utils/autopost');
 
@@ -36,6 +37,7 @@ class GuildConfigStore {
         autopost_enabled INTEGER NOT NULL DEFAULT 0,
         channel_id TEXT,
         count INTEGER NOT NULL DEFAULT 10,
+        preset_mode TEXT NOT NULL DEFAULT 'count',
         preset_country TEXT,
         preset_category TEXT,
         updated_at TEXT NOT NULL,
@@ -46,6 +48,7 @@ class GuildConfigStore {
       ON guild_autopost_configs (autopost_enabled);
     `);
 
+    this.ensureGuildAutopostConfigSchema();
     this.prepareStatements();
     await this.importLegacyStateIfNeeded();
     this.logger.info('guild_config_store.initialized', {
@@ -81,6 +84,7 @@ class GuildConfigStore {
     guildId,
     channelId,
     count = DEFAULT_AUTOPOST_COUNT,
+    mode = 'count',
     country = null,
     category = null,
     updatedBy = null
@@ -90,6 +94,7 @@ class GuildConfigStore {
       guildId: String(guildId),
       channelId: String(channelId),
       count: normalizeAutopostCount(count),
+      mode: normalizeAutopostMode(mode),
       country: filters.country,
       category: filters.category,
       updatedAt: new Date().toISOString(),
@@ -123,6 +128,7 @@ class GuildConfigStore {
           autopost_enabled,
           channel_id,
           count,
+          preset_mode,
           preset_country,
           preset_category,
           updated_at,
@@ -136,6 +142,7 @@ class GuildConfigStore {
           autopost_enabled,
           channel_id,
           count,
+          preset_mode,
           preset_country,
           preset_category,
           updated_at,
@@ -150,6 +157,7 @@ class GuildConfigStore {
           autopost_enabled,
           channel_id,
           count,
+          preset_mode,
           preset_country,
           preset_category,
           updated_at,
@@ -159,6 +167,7 @@ class GuildConfigStore {
           1,
           @channelId,
           @count,
+          @mode,
           @country,
           @category,
           @updatedAt,
@@ -168,6 +177,7 @@ class GuildConfigStore {
           autopost_enabled = excluded.autopost_enabled,
           channel_id = excluded.channel_id,
           count = excluded.count,
+          preset_mode = excluded.preset_mode,
           preset_country = excluded.preset_country,
           preset_category = excluded.preset_category,
           updated_at = excluded.updated_at,
@@ -201,6 +211,19 @@ class GuildConfigStore {
     }
 
     return this.statements;
+  }
+
+  ensureGuildAutopostConfigSchema() {
+    const columns = this.db
+      .prepare('PRAGMA table_info(guild_autopost_configs)')
+      .all()
+      .map((column) => column.name);
+
+    if (!columns.includes('preset_mode')) {
+      this.db.exec(
+        "ALTER TABLE guild_autopost_configs ADD COLUMN preset_mode TEXT NOT NULL DEFAULT 'count'"
+      );
+    }
   }
 
   async importLegacyStateIfNeeded() {
@@ -257,6 +280,7 @@ class GuildConfigStore {
           guildId: String(guildId),
           channelId: String(legacyConfig.channelId),
           count: DEFAULT_AUTOPOST_COUNT,
+          mode: 'count',
           country: null,
           category: null,
           updatedAt:
@@ -282,6 +306,7 @@ function mapGuildConfigRow(row) {
     autopostEnabled: Boolean(row.autopost_enabled),
     channelId: row.channel_id || null,
     count: normalizeAutopostCount(row.count),
+    mode: normalizeAutopostMode(row.preset_mode),
     country: row.preset_country || null,
     category: row.preset_category || null,
     updatedAt: row.updated_at || null,

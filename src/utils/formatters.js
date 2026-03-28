@@ -1,6 +1,10 @@
 const { EmbedBuilder } = require('discord.js');
 const { COMMAND_HELP_ENTRIES } = require('../discord/commandCatalog');
-const { formatAutopostFilters } = require('./autopost');
+const {
+  formatAutopostFilters,
+  formatAutopostMode,
+  formatAutopostModeSummary
+} = require('./autopost');
 
 const COLORS = Object.freeze({
   info: 0x5865f2,
@@ -27,10 +31,47 @@ const SELL_TARGETS = Object.freeze({
   })
 });
 
+const HELP_GROUPS = Object.freeze([
+  Object.freeze({
+    title: 'General',
+    commandNames: ['/help']
+  }),
+  Object.freeze({
+    title: 'Runs',
+    commandNames: [
+      '/run best',
+      '/run top',
+      '/run selltarget',
+      '/run country',
+      '/run item',
+      '/run category'
+    ]
+  }),
+  Object.freeze({
+    title: 'Pricing & Stock',
+    commandNames: ['/price', '/stock', '/restock']
+  }),
+  Object.freeze({
+    title: 'Autopost',
+    commandNames: ['/autopost enable', '/autopost disable', '/autopost status']
+  }),
+  Object.freeze({
+    title: 'Giveaways',
+    commandNames: ['/giveaway status', '/giveaway start', '/giveaway end', '/giveaway reroll']
+  })
+]);
+
 const moneyFormatter = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
   maximumFractionDigits: 2
+});
+
+const tctTimeFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'UTC',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false
 });
 
 function toNumber(value) {
@@ -96,6 +137,14 @@ function getActiveSellTarget(value) {
   return normalizeSellTarget(value) || 'market';
 }
 
+function getSellTargetListLabel(target) {
+  return SELL_TARGETS[getActiveSellTarget(target)]?.listLabel || SELL_TARGETS.market.listLabel;
+}
+
+function normalizeComparableText(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 function formatSellTargetPrice(target, value) {
   if (target === 'bazaar' && toNumber(value) === null) {
     return 'Unavailable';
@@ -141,6 +190,29 @@ function formatCount(value) {
   }).format(numeric);
 }
 
+function formatDurationMinutes(value, { approximate = false } = {}) {
+  const numeric = toNumber(value);
+
+  if (numeric === null || numeric < 0) {
+    return approximate ? '~Unavailable' : 'Unavailable';
+  }
+
+  const totalMinutes = Math.max(0, Math.round(numeric));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  const parts = [];
+
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+
+  if (minutes > 0 || !parts.length) {
+    parts.push(`${minutes}m`);
+  }
+
+  return `${approximate ? '~' : ''}${parts.join(' ')}`;
+}
+
 function toDiscordTimestamp(value, style = 'R') {
   const timestamp = Date.parse(value || '');
 
@@ -159,6 +231,16 @@ function formatFooterDate(value) {
   }
 
   return new Date(timestamp).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
+}
+
+function formatTctClockTime(value) {
+  const timestamp = Date.parse(value || '');
+
+  if (!Number.isFinite(timestamp)) {
+    return 'Unknown';
+  }
+
+  return tctTimeFormatter.format(new Date(timestamp));
 }
 
 function buildBaseEmbed({
@@ -180,10 +262,10 @@ function buildBaseEmbed({
   return embed;
 }
 
-function addFreshnessFooter(embed, generatedAt) {
+function addFreshnessFooter(embed, generatedAt, sourceLabel = 'DroqsDB Public API') {
   const footerText = generatedAt
-    ? `Source: DroqsDB Public API | Generated ${formatFooterDate(generatedAt)}`
-    : 'Source: DroqsDB Public API';
+    ? `Source: ${sourceLabel} | Generated ${formatFooterDate(generatedAt)}`
+    : `Source: ${sourceLabel}`;
 
   embed.setFooter({
     text: footerText
@@ -192,16 +274,74 @@ function addFreshnessFooter(embed, generatedAt) {
   return embed;
 }
 
-function runFieldValue(run, activeSellTarget) {
-  const lines = [
-    `${run.country} - ${run.category}`,
-    `Stock: ${formatCount(run.stock)} | Buy: ${formatMoney(run.buyPrice)}`,
-    `Sell: ${buildSellPriceSummary(run, activeSellTarget)}`,
-    `Profit/item: ${formatMoney(run.profitPerItem, { signed: true })} | Profit/min: ${formatMoney(run.profitPerMinute, { signed: true })}`
-  ];
+function joinCompactParts(parts) {
+  return parts.filter(Boolean).join(' | ');
+}
 
-  if (run.stockUpdatedAt) {
-    lines.push(`Stock updated ${toDiscordTimestamp(run.stockUpdatedAt, 'R')}`);
+function buildRunFieldName(run, index, {
+  scopeCountry = null
+} = {}) {
+  const parts = [String(run?.itemName || '').trim() || 'Run'];
+
+  if (
+    run?.country &&
+    normalizeComparableText(run.country) !== normalizeComparableText(scopeCountry)
+  ) {
+    parts.push(run.country);
+  }
+
+  return `#${index + 1} ${parts.join(' - ')}`;
+}
+
+function buildRunScopeSummary(run, {
+  scopeCategory = null
+} = {}) {
+  const parts = [];
+
+  if (
+    run.category &&
+    normalizeComparableText(run.category) !== normalizeComparableText(scopeCategory)
+  ) {
+    parts.push(run.category);
+  }
+
+  return parts.join(' - ');
+}
+
+function buildRunFreshnessSummary(run) {
+  return joinCompactParts([
+    run.stockUpdatedAt ? `Stock ${toDiscordTimestamp(run.stockUpdatedAt, 'R')}` : null,
+    run.pricingUpdatedAt ? `Pricing ${toDiscordTimestamp(run.pricingUpdatedAt, 'R')}` : null
+  ]);
+}
+
+function formatSourceFreshness(label, source, updatedAt) {
+  return joinCompactParts([
+    `${label}: ${source || 'Unknown'}`,
+    updatedAt ? toDiscordTimestamp(updatedAt, 'R') : null
+  ]);
+}
+
+function runFieldValue(run, activeSellTarget, {
+  scopeCategory = null
+} = {}) {
+  const scopeSummary = buildRunScopeSummary(run, { scopeCategory });
+  const freshnessSummary = buildRunFreshnessSummary(run);
+  const lines = [
+    joinCompactParts([
+      `Profit/min: ${formatMoney(run.profitPerMinute, { signed: true })}`,
+      `Profit/item: ${formatMoney(run.profitPerItem, { signed: true })}`
+    ]),
+    joinCompactParts([
+      `Stock: ${formatCount(run.stock)}`,
+      `Buy: ${formatMoney(run.buyPrice)}`
+    ]),
+    `Sell: ${buildSellPriceSummary(run, activeSellTarget)}`
+  ];
+  const metaLine = joinCompactParts([scopeSummary, freshnessSummary]);
+
+  if (metaLine) {
+    lines.push(metaLine);
   }
 
   return lines.join('\n');
@@ -213,7 +353,9 @@ function buildRunListEmbed({
   runs,
   generatedAt,
   url,
-  activeSellTarget = 'market'
+  activeSellTarget = 'market',
+  scopeCountry = null,
+  scopeCategory = null
 }) {
   const embed = buildBaseEmbed({
     title,
@@ -224,8 +366,10 @@ function buildRunListEmbed({
 
   for (const [index, run] of runs.entries()) {
     embed.addFields({
-      name: `#${index + 1} ${run.itemName}`,
-      value: runFieldValue(run, activeSellTarget),
+      name: buildRunFieldName(run, index, { scopeCountry }),
+      value: runFieldValue(run, activeSellTarget, {
+        scopeCategory
+      }),
       inline: false
     });
   }
@@ -240,45 +384,36 @@ function buildBestRunEmbed({
   activeSellTarget = 'market'
 }) {
   const embed = buildBaseEmbed({
-    title: `Best Run Right Now: ${run.itemName}`,
-    description: `${run.country} - ${run.category}`,
+    title: 'Best Run Right Now',
+    description: [
+      `**${[run.itemName, run.country].filter(Boolean).join(' - ')}**`,
+      joinCompactParts([
+        `Profit/min: ${formatMoney(run.profitPerMinute, { signed: true })}`,
+        `Profit/item: ${formatMoney(run.profitPerItem, { signed: true })}`
+      ]),
+      joinCompactParts([
+        run.category || null,
+        `Stock: ${formatCount(run.stock)}`,
+        `Buy: ${formatMoney(run.buyPrice)}`
+      ])
+    ].join('\n'),
     color: COLORS.success,
     url
   });
 
   embed.addFields(
     {
-      name: 'Stock',
-      value: formatCount(run.stock),
-      inline: true
+      name: `Sell Prices (${getSellTargetListLabel(activeSellTarget)} active)`,
+      value: buildSellPriceSummary(run, activeSellTarget),
+      inline: false
     },
     {
-      name: 'Buy Price',
-      value: formatMoney(run.buyPrice),
-      inline: true
-    },
-    buildSellPriceField('market', run, activeSellTarget),
-    buildSellPriceField('bazaar', run, activeSellTarget),
-    buildSellPriceField('torn', run, activeSellTarget),
-    {
-      name: 'Profit / Item',
-      value: formatMoney(run.profitPerItem, { signed: true }),
-      inline: true
-    },
-    {
-      name: 'Profit / Minute',
-      value: formatMoney(run.profitPerMinute, { signed: true }),
-      inline: true
-    },
-    {
-      name: 'Stock Source',
-      value: `${run.source || 'Unknown'} - ${toDiscordTimestamp(run.stockUpdatedAt, 'R')}`,
-      inline: true
-    },
-    {
-      name: 'Pricing Source',
-      value: `${run.pricingSource || 'Unknown'} - ${toDiscordTimestamp(run.pricingUpdatedAt, 'R')}`,
-      inline: true
+      name: 'Freshness',
+      value: joinCompactParts([
+        formatSourceFreshness('Stock', run.source, run.stockUpdatedAt),
+        formatSourceFreshness('Pricing', run.pricingSource, run.pricingUpdatedAt)
+      ]),
+      inline: false
     }
   );
 
@@ -467,30 +602,265 @@ function buildRestockEmbed({
   return addFreshnessFooter(embed, generatedAt);
 }
 
+function buildRunEmptyStateGuidanceEmbed({
+  title,
+  fallbackDescription,
+  guidance = null,
+  generatedAt = null,
+  sourceLabel = 'DroqsDB Public API',
+  url
+}) {
+  const normalizedGuidance = normalizeEmptyStateGuidance(guidance);
+
+  if (!normalizedGuidance?.kind) {
+    return addFreshnessFooter(
+      buildBaseEmbed({
+        title,
+        description: fallbackDescription,
+        color: COLORS.info,
+        url
+      }),
+      generatedAt,
+      sourceLabel
+    );
+  }
+
+  if (normalizedGuidance.kind === 'next_run') {
+    const lines = ['No profitable runs are live right now.'];
+
+    if (normalizedGuidance.itemName && normalizedGuidance.country) {
+      lines.push(
+        `Next target: **${normalizedGuidance.itemName} - ${normalizedGuidance.country}**`
+      );
+    } else if (normalizedGuidance.itemName) {
+      lines.push(`Next target: **${normalizedGuidance.itemName}**`);
+    } else if (normalizedGuidance.country) {
+      lines.push(`Next target: **${normalizedGuidance.country}**`);
+    }
+
+    if (normalizedGuidance.departureMinutes !== null) {
+      lines.push(
+        `Depart in: **${formatDurationMinutes(normalizedGuidance.departureMinutes)}**`
+      );
+    }
+
+    const timingDetails = [];
+
+    if (normalizedGuidance.departureAt) {
+      timingDetails.push(`TCT: ${formatTctClockTime(normalizedGuidance.departureAt)}`);
+    }
+
+    if (normalizedGuidance.viableWindowDurationMinutes !== null) {
+      timingDetails.push(
+        `Window: ${formatDurationMinutes(normalizedGuidance.viableWindowDurationMinutes, {
+          approximate: true
+        })}`
+      );
+    }
+
+    if (timingDetails.length) {
+      lines.push(timingDetails.join(' | '));
+    }
+
+    if (normalizedGuidance.tightWindow) {
+      lines.push('Timing is tight, so be ready to depart quickly.');
+    }
+
+    return addFreshnessFooter(
+      buildBaseEmbed({
+        title,
+        description: lines.join('\n'),
+        color: COLORS.info,
+        url
+      }),
+      generatedAt,
+      sourceLabel
+    );
+  }
+
+  if (normalizedGuidance.kind === 'timing_unreliable') {
+    return addFreshnessFooter(
+      buildBaseEmbed({
+        title,
+        description: [
+          'No profitable runs are live right now.',
+          'Upcoming timing is too unstable to call a reliable departure window.',
+          normalizedGuidance.message ||
+            'Check again shortly for a cleaner restock signal.'
+        ].join('\n'),
+        color: COLORS.warning,
+        url
+      }),
+      generatedAt,
+      sourceLabel
+    );
+  }
+
+  if (normalizedGuidance.kind === 'no_viable_runs') {
+    return addFreshnessFooter(
+      buildBaseEmbed({
+        title,
+        description: fallbackDescription,
+        color: COLORS.info,
+        url
+      }),
+      generatedAt,
+      sourceLabel
+    );
+  }
+
+  return addFreshnessFooter(
+    buildBaseEmbed({
+      title,
+      description: fallbackDescription,
+      color: COLORS.info,
+      url
+    }),
+    generatedAt,
+    sourceLabel
+  );
+}
+
+function normalizeEmptyStateGuidance(guidance) {
+  if (!guidance || typeof guidance !== 'object') {
+    return null;
+  }
+
+  const kind = String(guidance.kind || '').trim();
+
+  if (!kind) {
+    return null;
+  }
+
+  return {
+    kind,
+    itemName: String(guidance.itemName || '').trim() || null,
+    country: String(guidance.country || '').trim() || null,
+    message: String(guidance.message || '').trim() || null,
+    departureMinutes: toNumber(guidance.departureMinutes),
+    departureAt: guidance.departureAt || null,
+    viableWindowDurationMinutes: toNumber(guidance.viableWindowDurationMinutes),
+    tightWindow: guidance.tightWindow === true
+  };
+}
+
+function formatCompactAutopostRunLine(run) {
+  return joinCompactParts([
+    `**${run.itemName}** - ${run.country}`,
+    `${formatMoney(run.profitPerMinute, { signed: true })}/min`,
+    `Stock ${formatCount(run.stock)}`
+  ]);
+}
+
+function buildAutopostBucketEmbed({
+  title,
+  description,
+  sections,
+  generatedAt,
+  url
+}) {
+  const embed = buildBaseEmbed({
+    title,
+    description,
+    color: COLORS.success,
+    url
+  });
+
+  for (const section of sections) {
+    embed.addFields({
+      name: section.title,
+      value: section.runs.length
+        ? section.runs
+            .map((run, index) => `${index + 1}. ${formatCompactAutopostRunLine(run)}`)
+            .join('\n')
+        : 'No qualifying runs right now.',
+      inline: false
+    });
+  }
+
+  return addFreshnessFooter(embed, generatedAt);
+}
+
+function buildAutopostHighlightsEmbed({
+  title,
+  description,
+  highlights,
+  generatedAt,
+  url
+}) {
+  const embed = buildBaseEmbed({
+    title,
+    description,
+    color: COLORS.success,
+    url
+  });
+  const formatHighlightLine = (label, run) =>
+    `${label}: ${run ? formatCompactAutopostRunLine(run) : 'No qualifying run right now.'}`;
+
+  embed.addFields(
+    {
+      name: 'Overall',
+      value: highlights.overall
+        ? formatCompactAutopostRunLine(highlights.overall)
+        : 'No qualifying run right now.',
+      inline: false
+    },
+    {
+      name: 'By Category',
+      value: [
+        formatHighlightLine('Plushie', highlights.plushies),
+        formatHighlightLine('Flower', highlights.flowers),
+        formatHighlightLine('Drug', highlights.drugs)
+      ].join('\n'),
+      inline: false
+    },
+    {
+      name: 'By Flight Length',
+      value: [
+        formatHighlightLine('Short', highlights.short),
+        formatHighlightLine('Medium', highlights.medium),
+        formatHighlightLine('Long Haul', highlights.long)
+      ].join('\n'),
+      inline: false
+    }
+  );
+
+  return addFreshnessFooter(embed, generatedAt);
+}
+
 function buildHelpEmbed({ webBaseUrl }) {
   const embed = buildBaseEmbed({
     title: 'DroqsDB Bot Help',
     description:
-      'This bot reads live data from the DroqsDB Public API and shows travel profitability, stock, pricing, and restock information inside Discord.',
+      'Live DroqsDB travel, pricing, stock, autopost, and giveaway tools in one place.',
     color: COLORS.info,
     url: webBaseUrl
   });
 
   embed.addFields(
-    ...COMMAND_HELP_ENTRIES.map((entry) => ({
-      name: entry.name,
-      value: entry.value,
+    ...HELP_GROUPS.map((group) => ({
+      name: group.title,
+      value: group.commandNames
+        .map((commandName) =>
+          formatHelpEntryLine(COMMAND_HELP_ENTRIES.find((entry) => entry.name === commandName))
+        )
+        .filter(Boolean)
+        .join('\n'),
       inline: false
     })),
     {
-      name: 'Usage Notes',
+      name: 'Notes',
       value:
-        'Item names support autocomplete. Commands are rate limited per user and per server to keep the bot responsive. If DroqsDB is briefly unavailable, the bot may use recent cached data or ask you to try again shortly.',
+        [
+          'Item names support autocomplete.',
+          'Autopost and giveaway management require `Manage Server`.',
+          'If DroqsDB is briefly unavailable, the bot may use recent cached data or ask you to try again shortly.'
+        ].join('\n'),
       inline: false
     }
   );
 
-  return addFreshnessFooter(embed);
+  return addFreshnessFooter(embed, null, 'DroqBot');
 }
 
 function buildInfoEmbed(title, description, { url } = {}) {
@@ -535,7 +905,7 @@ function buildAutopostStatusEmbed({
   if (!config) {
     return buildBaseEmbed({
       title: 'Autopost Status',
-      description: 'Autopost has not been configured for this server yet.',
+      description: 'Autopost is not configured for this server yet.\nUse `/autopost enable` to start hourly posts.',
       color: COLORS.info,
       url
     });
@@ -543,28 +913,22 @@ function buildAutopostStatusEmbed({
 
   const embed = buildBaseEmbed({
     title: 'Autopost Status',
-    description: config.autopostEnabled
-      ? 'Hourly autoposting is enabled for this server.'
-      : 'Hourly autoposting is currently disabled for this server.',
+    description: [
+      config.autopostEnabled ? '**Enabled**' : '**Disabled**',
+      `${config.autopostEnabled ? 'Channel' : 'Configured channel'}: ${
+        config.channelId ? `<#${config.channelId}>` : 'Not configured'
+      }`,
+      `Mode: ${formatAutopostMode(config.mode)}`
+    ].join('\n'),
     color: config.autopostEnabled ? COLORS.success : COLORS.warning,
     url
   });
 
   embed.addFields(
     {
-      name: 'Status',
-      value: config.autopostEnabled ? 'Enabled' : 'Disabled',
-      inline: true
-    },
-    {
-      name: 'Channel',
-      value: config.channelId ? `<#${config.channelId}>` : 'Not configured',
-      inline: true
-    },
-    {
-      name: 'Count',
-      value: String(config.count),
-      inline: true
+      name: 'Mode Summary',
+      value: formatAutopostModeSummary(config),
+      inline: false
     },
     {
       name: 'Filters',
@@ -573,7 +937,9 @@ function buildAutopostStatusEmbed({
     },
     {
       name: 'Updated',
-      value: config.updatedAt ? toDiscordTimestamp(config.updatedAt, 'F') : 'Unknown',
+      value: config.updatedAt
+        ? `${toDiscordTimestamp(config.updatedAt, 'F')} (${toDiscordTimestamp(config.updatedAt, 'R')})`
+        : 'Unknown',
       inline: true
     },
     {
@@ -586,7 +952,23 @@ function buildAutopostStatusEmbed({
   return embed;
 }
 
+function formatHelpEntryLine(entry) {
+  if (!entry) {
+    return null;
+  }
+
+  const summary = String(entry.value || '')
+    .split('\n')
+    .slice(1)
+    .join(' ')
+    .trim();
+
+  return summary ? `\`${entry.name}\` - ${summary}` : `\`${entry.name}\``;
+}
+
 module.exports = {
+  buildAutopostBucketEmbed,
+  buildAutopostHighlightsEmbed,
   buildAutopostStatusEmbed,
   buildBestRunEmbed,
   buildErrorEmbed,
@@ -596,6 +978,7 @@ module.exports = {
   buildPriceEmbed,
   buildRateLimitEmbed,
   buildRestockEmbed,
+  buildRunEmptyStateGuidanceEmbed,
   buildRunListEmbed,
   buildStockEmbed,
   formatMoney,

@@ -1,0 +1,298 @@
+const { EmbedBuilder } = require('discord.js');
+const { GIVEAWAY_EMOJI } = require('./giveaway');
+
+const COLORS = Object.freeze({
+  info: 0x5865f2,
+  success: 0x2ecc71,
+  warning: 0xf1c40f
+});
+
+function joinCompactParts(parts) {
+  return parts.filter(Boolean).join(' | ');
+}
+
+function buildGiveawayEmbed({
+  prizeText,
+  winnerCount,
+  hostId,
+  endAt,
+  status = 'active',
+  winnerIds = [],
+  entrantCount = null,
+  eligibleEntrantCount = null,
+  endedAt = null,
+  rerolledAt = null
+}) {
+  const isEnded = status === 'ended';
+  const resolvedWinnerIds = normalizeIdList(winnerIds);
+  const resolvedEntrantCount = normalizeCount(entrantCount);
+  const resolvedEligibleEntrantCount =
+    normalizeCount(eligibleEntrantCount) ?? resolvedEntrantCount;
+  const title = isEnded ? 'Giveaway Flight Closed' : 'Giveaway Boarding Now';
+  const description = isEnded
+    ? resolvedWinnerIds.length
+      ? `${resolvedWinnerIds.length === 1 ? 'Passenger selected' : 'Passengers selected'}: ${formatWinnerMentions(resolvedWinnerIds)}`
+      : 'Flight closed. No eligible passengers were available at departure.'
+    : `React with ${GIVEAWAY_EMOJI} on this message to enter.`;
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(description)
+    .setColor(isEnded ? COLORS.warning : COLORS.success);
+  const resolvedEndedAt = endedAt || endAt;
+
+  embed.addFields(
+    {
+      name: 'Prize',
+      value: truncateText(prizeText, 1024),
+      inline: false
+    },
+    {
+      name: isEnded ? 'Closed' : 'Ends In',
+      value: isEnded ? toDiscordTimestamp(resolvedEndedAt, 'R') : toDiscordTimestamp(endAt, 'R'),
+      inline: true
+    },
+    {
+      name: isEnded ? 'Closed At' : 'End Time',
+      value: toDiscordTimestamp(resolvedEndedAt, 'F'),
+      inline: true
+    },
+    {
+      name: 'Winners',
+      value: String(Math.max(1, Math.floor(Number(winnerCount) || 1))),
+      inline: true
+    },
+    {
+      name: 'Host',
+      value: `<@${hostId}>`,
+      inline: true
+    }
+  );
+
+  if (!isEnded) {
+    embed.addFields({
+      name: 'How to Enter',
+      value: `React with ${GIVEAWAY_EMOJI} on this message.`,
+      inline: false
+    });
+    return embed;
+  }
+
+  embed.addFields({
+    name: 'Entries',
+    value: resolvedEntrantCount === null ? 'Unknown' : formatCount(resolvedEntrantCount),
+    inline: true
+  });
+
+  if (
+    resolvedEligibleEntrantCount !== null &&
+    resolvedEntrantCount !== null &&
+    resolvedEligibleEntrantCount !== resolvedEntrantCount
+  ) {
+    embed.addFields({
+      name: 'Eligible Now',
+      value: formatCount(resolvedEligibleEntrantCount),
+      inline: true
+    });
+  }
+
+  if (
+    resolvedEligibleEntrantCount !== null &&
+    resolvedEligibleEntrantCount > 0 &&
+    resolvedEligibleEntrantCount < winnerCount
+  ) {
+    const passengerLabel = resolvedEligibleEntrantCount === 1 ? 'passenger remained' : 'passengers remained';
+
+    embed.addFields({
+      name: 'Result',
+      value: `Only ${formatCount(resolvedEligibleEntrantCount)} eligible ${passengerLabel}, so all eligible passengers won.`,
+      inline: false
+    });
+  }
+
+  if (rerolledAt) {
+    embed.addFields({
+      name: 'Last Reroll',
+      value: formatTimestampPair(rerolledAt),
+      inline: false
+    });
+  }
+
+  return embed;
+}
+
+function buildGiveawayAnnouncementContent({
+  prizeText,
+  winnerIds = [],
+  entrantCount = 0,
+  eligibleEntrantCount = null,
+  winnerCount = 1,
+  rerolled = false
+}) {
+  const resolvedWinnerIds = normalizeIdList(winnerIds);
+  const resolvedEligibleEntrantCount =
+    normalizeCount(eligibleEntrantCount) ?? normalizeCount(entrantCount) ?? 0;
+  const safePrizeText = truncateText(sanitizeMentions(prizeText), 200);
+  const statusLabel = rerolled ? 'Passenger manifest updated' : 'Flight closed';
+
+  if (!resolvedWinnerIds.length) {
+    return `${GIVEAWAY_EMOJI} ${statusLabel} for **${safePrizeText}**.\nNo eligible passengers were available${rerolled ? ' for this reroll.' : '.'}`;
+  }
+
+  const winnerLabel = resolvedWinnerIds.length === 1 ? 'Passenger selected' : 'Passengers selected';
+  const shortageNote =
+    resolvedEligibleEntrantCount > 0 && resolvedEligibleEntrantCount < winnerCount
+      ? ` Only ${formatCount(resolvedEligibleEntrantCount)} eligible ${resolvedEligibleEntrantCount === 1 ? 'passenger remained' : 'passengers remained'}, so all eligible passengers were selected.`
+      : '';
+
+  return `${GIVEAWAY_EMOJI} ${statusLabel} for **${safePrizeText}**.\n${winnerLabel}: ${formatWinnerMentions(resolvedWinnerIds)}${shortageNote}`;
+}
+
+function buildGiveawayStatusEmbed({
+  guildName = null,
+  giveaways = []
+}) {
+  const activeGiveaways = Array.isArray(giveaways) ? giveaways.filter(Boolean) : [];
+
+  if (!activeGiveaways.length) {
+    return new EmbedBuilder()
+      .setTitle('Giveaway Status')
+      .setDescription('No giveaway flights are boarding right now.')
+      .setColor(COLORS.info);
+  }
+
+  const visibleGiveaways = activeGiveaways.slice(0, 5);
+  const embed = new EmbedBuilder()
+    .setTitle('Giveaway Status')
+    .setDescription(
+      [
+        guildName
+          ? `Active giveaway flights in ${sanitizeMentions(guildName)}:`
+          : 'Active giveaway flights here:',
+        ...visibleGiveaways.map(formatGiveawayStatusLine)
+      ].join('\n\n')
+    )
+    .setColor(COLORS.success);
+
+  if (activeGiveaways.length > visibleGiveaways.length) {
+    embed.setFooter({
+      text: `Showing ${visibleGiveaways.length} of ${activeGiveaways.length} active giveaways.`
+    });
+  }
+
+  return embed;
+}
+
+function buildExpiredGiveawayNoticeContent({
+  prizeText,
+  guildName = null,
+  compact = false
+}) {
+  const safePrizeText = truncateText(sanitizeMentions(prizeText), 120);
+  const locationLine = guildName
+    ? `That giveaway flight has already closed in **${sanitizeMentions(guildName)}**.`
+    : 'That giveaway flight has already closed here.';
+
+  if (compact) {
+    return `${locationLine} I removed your reaction. Prize: **${safePrizeText}**`;
+  }
+
+  return [
+    locationLine,
+    `Prize: **${safePrizeText}**`,
+    'I removed your reaction so the entry lane stays accurate.'
+  ].join('\n');
+}
+
+function formatWinnerMentions(winnerIds) {
+  const resolvedWinnerIds = normalizeIdList(winnerIds);
+  return resolvedWinnerIds.length
+    ? resolvedWinnerIds.map((winnerId) => `<@${winnerId}>`).join(', ')
+    : 'No winners';
+}
+
+function formatGiveawayStatusLine(giveaway) {
+  const isClosingNow =
+    giveaway.status === 'ending' || isPastTimestamp(giveaway.endAt);
+  const scheduleLabel = isClosingNow
+    ? 'Closing now'
+    : `Ends ${toDiscordTimestamp(giveaway.endAt, 'R')} (${toDiscordTimestamp(giveaway.endAt, 'F')})`;
+
+  return [
+    `**${truncateText(sanitizeMentions(giveaway.prizeText), 80)}**`,
+    joinCompactParts([
+      `<#${giveaway.channelId}>`,
+      `${formatCount(giveaway.winnerCount)} winner(s)`
+    ]),
+    scheduleLabel
+  ].join('\n');
+}
+
+function formatCount(value) {
+  const numeric = Number(value);
+
+  if (!Number.isFinite(numeric)) {
+    return 'N/A';
+  }
+
+  return new Intl.NumberFormat('en-US', {
+    maximumFractionDigits: 0
+  }).format(numeric);
+}
+
+function formatTimestampPair(value) {
+  return `${toDiscordTimestamp(value, 'F')} (${toDiscordTimestamp(value, 'R')})`;
+}
+
+function toDiscordTimestamp(value, style = 'R') {
+  const timestamp = Date.parse(value || '');
+
+  if (!Number.isFinite(timestamp)) {
+    return 'Unknown';
+  }
+
+  return `<t:${Math.floor(timestamp / 1000)}:${style}>`;
+}
+
+function truncateText(value, maxLength = 1024) {
+  const normalized = String(value || '').trim() || 'Unavailable';
+
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function sanitizeMentions(value) {
+  return String(value || '').replace(/@/g, '@\u200b');
+}
+
+function normalizeIdList(value) {
+  return Array.from(
+    new Set(
+      Array.isArray(value)
+        ? value
+            .map((entry) => String(entry || '').trim())
+            .filter(Boolean)
+        : []
+    )
+  );
+}
+
+function normalizeCount(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.max(0, Math.floor(numeric)) : null;
+}
+
+function isPastTimestamp(value) {
+  const timestamp = Date.parse(value || '');
+  return Number.isFinite(timestamp) && timestamp <= Date.now();
+}
+
+module.exports = {
+  buildExpiredGiveawayNoticeContent,
+  buildGiveawayAnnouncementContent,
+  buildGiveawayEmbed,
+  buildGiveawayStatusEmbed,
+  formatWinnerMentions
+};

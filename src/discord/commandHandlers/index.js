@@ -1,4 +1,5 @@
 const autopost = require('./autopost');
+const giveaway = require('./giveaway');
 const help = require('./help');
 const price = require('./price');
 const restock = require('./restock');
@@ -17,6 +18,7 @@ const {
 
 const handlers = Object.freeze({
   autopost,
+  giveaway,
   help,
   price,
   restock,

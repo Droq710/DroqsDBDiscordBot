@@ -5,7 +5,10 @@ const {
 } = require('../../utils/formatters');
 const {
   DEFAULT_AUTOPOST_COUNT,
-  formatAutopostFilters
+  formatAutopostFilters,
+  formatAutopostMode,
+  formatAutopostModeSummary,
+  normalizeAutopostMode
 } = require('../../utils/autopost');
 
 function assertGuildAdmin(interaction) {
@@ -77,6 +80,7 @@ async function execute(interaction, context) {
   if (subcommand === 'enable') {
     const channel = interaction.options.getChannel('channel', true);
     const count = interaction.options.getInteger('count') ?? DEFAULT_AUTOPOST_COUNT;
+    const mode = normalizeAutopostMode(interaction.options.getString('mode'));
     const category = interaction.options.getString('category');
     const country = interaction.options.getString('country');
 
@@ -86,6 +90,7 @@ async function execute(interaction, context) {
       guildId: interaction.guildId,
       channelId: channel.id,
       count,
+      mode,
       category,
       country,
       updatedBy: interaction.user.id
@@ -96,6 +101,7 @@ async function execute(interaction, context) {
       count: guildConfig.count,
       country: guildConfig.country,
       guildId: interaction.guildId,
+      mode: guildConfig.mode,
       userId: interaction.user.id
     });
 
@@ -103,7 +109,12 @@ async function execute(interaction, context) {
       embeds: [
         buildInfoEmbed(
           'Autopost Enabled',
-          `Hourly DroqsDB autoposts will be sent to ${channel}.\nCount: ${guildConfig.count}\nFilters: ${formatAutopostFilters(guildConfig)}`,
+          [
+            `Hourly DroqsDB autoposts will be sent to ${channel}.`,
+            `Mode: ${formatAutopostMode(guildConfig.mode)}`,
+            `Mode Details: ${formatAutopostModeSummary(guildConfig)}`,
+            `Filters: ${formatAutopostFilters(guildConfig)}`
+          ].join('\n'),
           { url: context.config.droqsdbWebBaseUrl }
         )
       ],

@@ -8,6 +8,7 @@ const { assertBotConfig, config } = require('../config');
 const { COUNTRY_CHOICES, RUN_CATEGORY_CHOICES } = require('../constants/droqsdb');
 const { createLogger } = require('../services/logger');
 const {
+  AUTOPOST_MODE_CHOICES,
   DEFAULT_AUTOPOST_COUNT,
   MAX_AUTOPOST_COUNT,
   MIN_AUTOPOST_COUNT
@@ -186,6 +187,66 @@ function buildCommands() {
       ),
 
     new SlashCommandBuilder()
+      .setName('giveaway')
+      .setDescription('Create and manage simple server giveaways.')
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName('status')
+          .setDescription('Show active giveaway flights for this server.')
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName('start')
+          .setDescription('Start a giveaway in the current channel.')
+          .addStringOption((option) =>
+            option
+              .setName('item')
+              .setDescription('Prize text shown in the giveaway.')
+              .setRequired(true)
+              .setMaxLength(200)
+          )
+          .addIntegerOption((option) =>
+            option
+              .setName('winners')
+              .setDescription('How many winners to draw.')
+              .setRequired(true)
+              .setMinValue(1)
+              .setMaxValue(10)
+          )
+          .addStringOption((option) =>
+            option
+              .setName('duration')
+              .setDescription('Examples: 15m, 2h, 1h15m, 1d6h, 2d3h30m.')
+              .setRequired(true)
+              .setMaxLength(20)
+          )
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName('end')
+          .setDescription('End a giveaway early and draw winners now.')
+          .addStringOption((option) =>
+            option
+              .setName('message_id')
+              .setDescription('Message ID of the giveaway message.')
+              .setRequired(true)
+              .setMaxLength(32)
+          )
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName('reroll')
+          .setDescription('Reroll winners for a giveaway that already ended.')
+          .addStringOption((option) =>
+            option
+              .setName('message_id')
+              .setDescription('Message ID of the giveaway message.')
+              .setRequired(true)
+              .setMaxLength(32)
+          )
+      ),
+
+    new SlashCommandBuilder()
       .setName('autopost')
       .setDescription('Configure hourly DroqsDB autoposting for this server.')
       .addSubcommand((subcommand) =>
@@ -202,9 +263,15 @@ function buildCommands() {
           .addIntegerOption((option) =>
             option
               .setName('count')
-              .setDescription(`How many runs to post. Defaults to ${DEFAULT_AUTOPOST_COUNT}.`)
+              .setDescription(`How many runs to post in Top Count mode. Defaults to ${DEFAULT_AUTOPOST_COUNT}.`)
               .setMinValue(MIN_AUTOPOST_COUNT)
               .setMaxValue(MAX_AUTOPOST_COUNT)
+          )
+          .addStringOption((option) =>
+            option
+              .setName('mode')
+              .setDescription('Posting layout. Defaults to Top Count.')
+              .addChoices(...AUTOPOST_MODE_CHOICES)
           )
           .addStringOption((option) =>
             option

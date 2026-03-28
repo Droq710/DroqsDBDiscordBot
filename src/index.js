@@ -1,9 +1,11 @@
-const { Client, Events, GatewayIntentBits } = require('discord.js');
+const { Client, Events, GatewayIntentBits, Partials } = require('discord.js');
 const { DroqsDbClient } = require('./api/droqsdbClient');
 const { assertBotConfig, config } = require('./config');
 const { handleAutocomplete, handleChatInputCommand } = require('./discord/commandHandlers');
 const { AutopostService } = require('./services/autopost');
 const { TTLCache } = require('./services/cache');
+const { GiveawayService } = require('./services/giveaway');
+const { GiveawayStore } = require('./services/giveawayStore');
 const { GuildConfigStore } = require('./services/guildConfigStore');
 const { createLogger } = require('./services/logger');
 const { CommandRateLimiter } = require('./services/rateLimiter');
@@ -33,7 +35,17 @@ async function main() {
   });
 
   const discordClient = new Client({
-    intents: [GatewayIntentBits.Guilds]
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.GuildMessageReactions
+    ],
+    partials: [
+      Partials.Channel,
+      Partials.Message,
+      Partials.Reaction,
+      Partials.User
+    ]
   });
 
   const droqsdbClient = new DroqsDbClient({
@@ -55,6 +67,12 @@ async function main() {
       component: 'guild_config_store'
     })
   });
+  const giveawayStore = new GiveawayStore({
+    databasePath: config.autopostDbFile,
+    logger: rootLogger.child({
+      component: 'giveaway_store'
+    })
+  });
 
   const autopostService = new AutopostService({
     discordClient,
@@ -64,6 +82,13 @@ async function main() {
     timezone: config.autopostTimezone,
     logger: rootLogger.child({
       component: 'autopost'
+    })
+  });
+  const giveawayService = new GiveawayService({
+    discordClient,
+    giveawayStore,
+    logger: rootLogger.child({
+      component: 'giveaway'
     })
   });
 
@@ -78,10 +103,12 @@ async function main() {
   });
 
   await guildConfigStore.initialize();
+  await giveawayStore.initialize();
 
   const health = await runStartupHealthCheck({
     droqsdbClient,
     guildConfigStore,
+    giveawayStore,
     logger
   });
 
@@ -96,6 +123,7 @@ async function main() {
     commandUserRateLimitWindowMs: config.commandUserRateLimitWindowMs,
     droqsdbStatus: health.droqsdbStatus,
     enabledAutopostGuilds: health.enabledAutopostGuilds,
+    pendingGiveaways: health.pendingGiveaways,
     metaGeneratedAt: health.generatedAt,
     requestTimeoutMs: config.droqsdbApiTimeoutMs,
     shortCacheStaleTtlMs: config.apiCacheStaleTtlMs,
@@ -106,6 +134,7 @@ async function main() {
     config,
     droqsdbClient,
     autopostService,
+    giveawayService,
     logger: rootLogger.child({
       component: 'commands'
     }),
@@ -127,6 +156,15 @@ async function main() {
     } catch (error) {
       logger.error('startup.autopost_start_failed', error);
     }
+
+    try {
+      await giveawayService.start();
+      logger.info('startup.ready', {
+        giveawayScheduler: 'started'
+      });
+    } catch (error) {
+      logger.error('startup.giveaway_start_failed', error);
+    }
   });
 
   discordClient.on(Events.InteractionCreate, async (interaction) => {
@@ -146,6 +184,17 @@ async function main() {
         commandName: interaction.commandName,
         guildId: interaction.guildId || null,
         userId: interaction.user?.id || null
+      });
+    }
+  });
+
+  discordClient.on(Events.MessageReactionAdd, async (reaction, user) => {
+    try {
+      await giveawayService.handleReactionAdd(reaction, user);
+    } catch (error) {
+      rootLogger.error('discord.reaction_add_unhandled_error', error, {
+        messageId: reaction.message?.id || null,
+        userId: user?.id || null
       });
     }
   });
@@ -178,6 +227,12 @@ async function main() {
       autopostService.stop();
     } catch (error) {
       logger.error('shutdown.autopost_stop_failed', error);
+    }
+
+    try {
+      giveawayService.stop();
+    } catch (error) {
+      logger.error('shutdown.giveaway_stop_failed', error);
     }
 
     try {
@@ -219,6 +274,7 @@ async function main() {
 async function runStartupHealthCheck({
   droqsdbClient,
   guildConfigStore,
+  giveawayStore,
   logger
 }) {
   let droqsdbStatus = 'degraded';
@@ -235,6 +291,7 @@ async function runStartupHealthCheck({
   return {
     droqsdbStatus,
     enabledAutopostGuilds: guildConfigStore.listEnabledGuildConfigs().length,
+    pendingGiveaways: giveawayStore.listPendingGiveaways().length,
     generatedAt
   };
 }

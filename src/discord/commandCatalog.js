@@ -41,7 +41,8 @@ const COMMAND_HELP_ENTRIES = Object.freeze([
   },
   {
     name: '/autopost enable',
-    value: 'Usage: `/autopost enable channel:<channel> [count] [category] [country]`\nTurns on hourly guild autoposts. Requires `Manage Server`.'
+    value:
+      'Usage: `/autopost enable channel:<channel> [count:<1-10>] [mode] [category] [country]`\nTurns on hourly guild autoposts. Modes: Top Count, Flight Buckets, Mixed Highlights. Requires `Manage Server`.'
   },
   {
     name: '/autopost disable',
@@ -50,6 +51,26 @@ const COMMAND_HELP_ENTRIES = Object.freeze([
   {
     name: '/autopost status',
     value: 'Usage: `/autopost status`\nShows the current hourly autopost settings for this server.'
+  },
+  {
+    name: '/giveaway status',
+    value:
+      'Usage: `/giveaway status`\nShows the active giveaway(s) for this server. Public command.'
+  },
+  {
+    name: '/giveaway start',
+    value:
+      'Usage: `/giveaway start item:<text> winners:<1-10> duration:<15m|2h|1h15m|1d6h|2d3h30m>`\nCreates a reaction-based giveaway in the current channel. Requires `Manage Server`.'
+  },
+  {
+    name: '/giveaway end',
+    value:
+      'Usage: `/giveaway end message_id:<id>`\nEnds an active giveaway early and picks winners immediately. Requires `Manage Server`.'
+  },
+  {
+    name: '/giveaway reroll',
+    value:
+      'Usage: `/giveaway reroll message_id:<id>`\nRerolls winners from the saved entrant list after a giveaway has ended. Requires `Manage Server`.'
   }
 ]);
 

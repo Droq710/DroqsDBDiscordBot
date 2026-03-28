@@ -1,6 +1,7 @@
 const {
   buildBestRunEmbed,
   buildInfoEmbed,
+  buildRunEmptyStateGuidanceEmbed,
   buildRunListEmbed
 } = require('../../utils/formatters');
 const { categoryLabel } = require('../../constants/droqsdb');
@@ -47,6 +48,56 @@ function getSellTargetConfig(target) {
   return config;
 }
 
+async function buildEmptyRunEmbed({
+  context,
+  title,
+  fallbackDescription,
+  guidance = null,
+  generatedAt = null,
+  sourceLabel = 'DroqsDB Public API',
+  allowCompanionFallback = false,
+  companionGuidanceFilters = null
+}) {
+  let resolvedGuidance = guidance;
+  let resolvedGeneratedAt = generatedAt;
+  let resolvedSourceLabel = sourceLabel;
+
+  if (
+    allowCompanionFallback === true &&
+    !hasGuidanceKind(resolvedGuidance) &&
+    companionGuidanceFilters
+  ) {
+    try {
+      const guidancePayload = await context.droqsdbClient.getRunEmptyStateGuidance(
+        companionGuidanceFilters
+      );
+
+      if (hasGuidanceKind(guidancePayload?.emptyStateGuidance)) {
+        resolvedGuidance = guidancePayload.emptyStateGuidance;
+        resolvedGeneratedAt = guidancePayload.generatedAt || resolvedGeneratedAt;
+        resolvedSourceLabel = 'DroqsDB Companion API';
+      }
+    } catch (error) {
+      context.logger.warn('run.empty_state_guidance_failed', error, {
+        guidanceFilters: companionGuidanceFilters
+      });
+    }
+  }
+
+  return buildRunEmptyStateGuidanceEmbed({
+    title,
+    fallbackDescription,
+    guidance: resolvedGuidance,
+    generatedAt: resolvedGeneratedAt,
+    sourceLabel: resolvedSourceLabel,
+    url: context.config.droqsdbWebBaseUrl
+  });
+}
+
+function hasGuidanceKind(guidance) {
+  return typeof guidance?.kind === 'string' && guidance.kind.trim().length > 0;
+}
+
 async function execute(interaction, context) {
   const subcommand = interaction.options.getSubcommand();
   await interaction.deferReply();
@@ -58,11 +109,13 @@ async function execute(interaction, context) {
     if (!bestRun) {
       await interaction.editReply({
         embeds: [
-          buildInfoEmbed(
-            'No Best Run Available',
-            'DroqsDB does not currently report any profitable in-stock runs.',
-            { url: context.config.droqsdbWebBaseUrl }
-          )
+          await buildEmptyRunEmbed({
+            context,
+            title: 'No Best Run Available',
+            fallbackDescription: 'DroqsDB does not currently report any profitable in-stock runs.',
+            guidance: payload.emptyStateGuidance,
+            generatedAt: payload.generatedAt
+          })
         ]
       });
       return;
@@ -89,11 +142,13 @@ async function execute(interaction, context) {
     if (!runs.length) {
       await interaction.editReply({
         embeds: [
-          buildInfoEmbed(
-            'No Current Runs Available',
-            'DroqsDB does not currently report any profitable in-stock runs.',
-            { url: context.config.droqsdbWebBaseUrl }
-          )
+          await buildEmptyRunEmbed({
+            context,
+            title: 'No Current Runs Available',
+            fallbackDescription: 'DroqsDB does not currently report any profitable in-stock runs.',
+            guidance: payload.emptyStateGuidance,
+            generatedAt: payload.generatedAt
+          })
         ]
       });
       return;
@@ -160,11 +215,14 @@ async function execute(interaction, context) {
     if (!payload.runs.length) {
       await interaction.editReply({
         embeds: [
-          buildInfoEmbed(
-            `No Current Runs for ${payload.country}`,
-            'There are no currently profitable in-stock runs for that country right now.',
-            { url: context.config.droqsdbWebBaseUrl }
-          )
+          await buildEmptyRunEmbed({
+            context,
+            title: `No Current Runs for ${payload.country}`,
+            fallbackDescription:
+              'There are no currently profitable in-stock runs for that country right now.',
+            guidance: payload.emptyStateGuidance,
+            generatedAt: payload.generatedAt
+          })
         ]
       });
       return;
@@ -178,7 +236,8 @@ async function execute(interaction, context) {
           runs: payload.runs,
           generatedAt: payload.generatedAt,
           url: context.config.droqsdbWebBaseUrl,
-          activeSellTarget: 'market'
+          activeSellTarget: 'market',
+          scopeCountry: payload.country
         })
       ]
     });
@@ -197,8 +256,12 @@ async function execute(interaction, context) {
 
       await interaction.editReply({
         embeds: [
-          buildInfoEmbed(`No Current Runs for ${payload.item.itemName}`, description, {
-            url: context.config.droqsdbWebBaseUrl
+          await buildEmptyRunEmbed({
+            context,
+            title: `No Current Runs for ${payload.item.itemName}`,
+            fallbackDescription: description,
+            guidance: payload.emptyStateGuidance,
+            generatedAt: payload.generatedAt
           })
         ]
       });
@@ -213,7 +276,8 @@ async function execute(interaction, context) {
           runs: payload.currentRuns,
           generatedAt: payload.generatedAt,
           url: context.config.droqsdbWebBaseUrl,
-          activeSellTarget: 'market'
+          activeSellTarget: 'market',
+          scopeCategory: payload.item.category
         })
       ]
     });
@@ -228,11 +292,17 @@ async function execute(interaction, context) {
     if (!payload.runs.length) {
       await interaction.editReply({
         embeds: [
-          buildInfoEmbed(
-            `No Current ${categoryLabel(payload.category)} Runs`,
-            'There are no currently profitable in-stock runs in that category right now.',
-            { url: context.config.droqsdbWebBaseUrl }
-          )
+          await buildEmptyRunEmbed({
+            context,
+            title: `No Current ${categoryLabel(payload.category)} Runs`,
+            fallbackDescription:
+              'There are no currently profitable in-stock runs in that category right now.',
+            generatedAt: payload.generatedAt,
+            allowCompanionFallback: true,
+            companionGuidanceFilters: {
+              category: payload.category
+            }
+          })
         ]
       });
       return;
@@ -246,7 +316,8 @@ async function execute(interaction, context) {
           runs: payload.runs,
           generatedAt: payload.generatedAt,
           url: context.config.droqsdbWebBaseUrl,
-          activeSellTarget: 'market'
+          activeSellTarget: 'market',
+          scopeCategory: payload.category
         })
       ]
     });
