@@ -7,6 +7,7 @@ const {
 } = require('../constants/droqsdb');
 
 const COMPANION_TRAVEL_PLANNER_QUERY_PATH = '/api/companion/v1/travel-planner/query';
+const DEFAULT_DROQSDB_API_TIMEOUT_MS = 30_000;
 const DEFAULT_COMPANION_TRAVEL_PLANNER_SETTINGS = Object.freeze({
   sellWhere: 'market',
   applyTax: true,
@@ -66,7 +67,7 @@ class DroqsDbClient {
     logger = console,
     defaultTtlMs = 30_000,
     defaultStaleTtlMs = 120_000,
-    requestTimeoutMs = 8_000
+    requestTimeoutMs = DEFAULT_DROQSDB_API_TIMEOUT_MS
   }) {
     this.baseUrl = String(baseUrl || '').replace(/\/+$/, '');
     this.webBaseUrl = String(webBaseUrl || '').replace(/\/+$/, '');
@@ -74,7 +75,7 @@ class DroqsDbClient {
     this.logger = logger;
     this.defaultTtlMs = defaultTtlMs;
     this.defaultStaleTtlMs = defaultStaleTtlMs;
-    this.requestTimeoutMs = requestTimeoutMs;
+    this.requestTimeoutMs = resolveRequestTimeoutMs(requestTimeoutMs);
   }
 
   buildApiUrl(pathname) {
@@ -709,6 +710,16 @@ function isRetryableStatus(status) {
 function normalizePositiveInteger(value, fallback) {
   const parsed = Number.parseInt(value, 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolveRequestTimeoutMs(requestTimeoutMs) {
+  const envTimeoutMs = normalizePositiveInteger(process.env.DROQSDB_API_TIMEOUT_MS, null);
+
+  if (envTimeoutMs !== null) {
+    return envTimeoutMs;
+  }
+
+  return normalizePositiveInteger(requestTimeoutMs, DEFAULT_DROQSDB_API_TIMEOUT_MS);
 }
 
 function normalizeSliceCount(count) {

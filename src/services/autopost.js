@@ -16,6 +16,9 @@ const {
   normalizeAutopostMode
 } = require('../utils/autopost');
 
+const AUTOPOST_FALLBACK_MESSAGE =
+  '⚠️ DroqsDB data temporarily unavailable. Will try again next hour.';
+
 class AutopostService {
   constructor({
     discordClient,
@@ -217,44 +220,35 @@ class AutopostService {
       targetChannelId: channel.id
     });
 
-    try {
-      payload =
-        mode === AUTOPOST_MODES.TOP_N
-          ? await this.droqsdbClient.getCurrentRunsForFilters({
-              count: activeGuildConfig.count,
-              countries: activeGuildConfig.countries,
-              categories: activeGuildConfig.categories
-            })
-          : await this.droqsdbClient.getCurrentRunUniverseForFilters({
-              countries: activeGuildConfig.countries,
-              categories: activeGuildConfig.categories
-            });
-    } catch (error) {
-      if (error instanceof DroqsDbApiError && (error.upstreamUnavailable || error.retryable)) {
-        this.logger.warn('autopost.fetch_skipped_upstream_unavailable', error, {
-          ...this.describeGuildConfig(activeGuildConfig),
-          ...buildRunLogContext(runContext)
-        });
-        return;
-      }
+    payload = await this.fetchAutopostPayload({
+      guildConfig: activeGuildConfig,
+      mode,
+      runContext,
+      targetChannelId: channel.id
+    });
 
-      this.logger.error('autopost.fetch_failed', error, {
-        ...this.describeGuildConfig(activeGuildConfig),
-        ...buildRunLogContext(runContext)
+    if (!payload) {
+      await this.sendFallbackMessage(channel, activeGuildConfig, runContext, {
+        reason: 'fetch_failed'
       });
       return;
     }
-
-    const runs = Array.isArray(payload?.runs) ? payload.runs : [];
 
     if (!Array.isArray(payload?.runs)) {
       this.logger.warn('autopost.payload_runs_missing', {
         ...this.describeGuildConfig(activeGuildConfig),
         ...buildRunLogContext(runContext),
-        apiPath: payload?.apiPath || null
+        apiPath: payload?.apiPath || null,
+        targetChannelId: channel.id
       });
+      await this.sendFallbackMessage(channel, activeGuildConfig, runContext, {
+        apiPath: payload?.apiPath || null,
+        reason: 'payload_runs_missing'
+      });
+      return;
     }
 
+    const runs = payload.runs;
     const normalizedPayload = {
       ...payload,
       runs
@@ -336,6 +330,97 @@ class AutopostService {
         await this.disableInvalidConfig(
           activeGuildConfig,
           `post failed with Discord error code ${error.code}`,
+          runContext
+        );
+      }
+    }
+  }
+
+  async fetchAutopostPayload({
+    guildConfig,
+    mode,
+    runContext = {},
+    targetChannelId = null
+  }) {
+    const fetchContext = {
+      ...this.describeGuildConfig(guildConfig),
+      ...buildRunLogContext(runContext),
+      requestTimeoutMs: this.droqsdbClient.requestTimeoutMs,
+      targetChannelId
+    };
+    const fetchRuns = () =>
+      mode === AUTOPOST_MODES.TOP_N
+        ? this.droqsdbClient.getCurrentRunsForFilters({
+            count: guildConfig.count,
+            countries: guildConfig.countries,
+            categories: guildConfig.categories
+          })
+        : this.droqsdbClient.getCurrentRunUniverseForFilters({
+            countries: guildConfig.countries,
+            categories: guildConfig.categories
+          });
+
+    this.logger.info('autopost.fetch_attempt', {
+      ...fetchContext,
+      attempt: 1
+    });
+
+    try {
+      return await fetchRuns();
+    } catch (error) {
+      if (!shouldRetryAutopostFetch(error)) {
+        this.logger.error('autopost.fetch_failed_final', error, {
+          ...fetchContext,
+          attempts: 1,
+          retried: false
+        });
+        return null;
+      }
+
+      this.logger.warn('autopost.fetch_retry', error, {
+        ...fetchContext,
+        nextAttempt: 2,
+        previousAttempt: 1
+      });
+
+      try {
+        return await fetchRuns();
+      } catch (retryError) {
+        this.logger.error('autopost.fetch_failed_final', retryError, {
+          ...fetchContext,
+          attempts: 2,
+          retried: true
+        });
+        return null;
+      }
+    }
+  }
+
+  async sendFallbackMessage(channel, guildConfig, runContext = {}, {
+    apiPath = null,
+    reason = 'fetch_failed'
+  } = {}) {
+    const logContext = {
+      ...this.describeGuildConfig(guildConfig),
+      ...buildRunLogContext(runContext),
+      apiPath,
+      reason,
+      targetChannelId: channel.id
+    };
+
+    try {
+      await channel.send({
+        content: AUTOPOST_FALLBACK_MESSAGE
+      });
+
+      this.logger.warn('autopost.fallback_posted', logContext);
+    } catch (error) {
+      this.logger.error('autopost.fallback_post_failed', error, logContext);
+
+      if ([10003, 50001, 50013].includes(Number(error.code))) {
+        await this.disableInvalidConfig(
+          guildConfig,
+          `fallback post failed with Discord error code ${error.code}`,
           runContext
         );
       }
@@ -577,6 +662,13 @@ function getEmptyStateKind(guidance) {
     .toLowerCase();
 
   return kind || null;
+}
+
+function shouldRetryAutopostFetch(error) {
+  return (
+    error instanceof DroqsDbApiError &&
+    (error.code === 'API_TIMEOUT' || error.upstreamUnavailable === true || Number(error.status) === 504)
+  );
 }
 
 function formatPermissionName(permission) {
