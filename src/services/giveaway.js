@@ -13,6 +13,7 @@ const {
 
 const EXPIRED_REACTION_NOTICE_COOLDOWN_MS = 10 * 60 * 1000;
 const EXPIRED_REACTION_FALLBACK_DELETE_DELAY_MS = 15_000;
+const GIVEAWAYS_ROLE_NAME = 'Giveaways';
 
 class GiveawayService {
   constructor({
@@ -86,11 +87,15 @@ class GiveawayService {
     durationMs
   }) {
     const endAt = new Date(Date.now() + durationMs).toISOString();
+    const giveawaysRole = channel.guild?.roles?.cache?.find(
+      (role) => role.name === GIVEAWAYS_ROLE_NAME
+    ) || null;
     let message = null;
     let createdGiveaway = null;
 
     try {
       message = await channel.send({
+        content: giveawaysRole ? `<@&${giveawaysRole.id}>` : undefined,
         embeds: [
           buildGiveawayEmbed({
             prizeText,
@@ -99,7 +104,13 @@ class GiveawayService {
             endAt,
             status: 'active'
           })
-        ]
+        ],
+        allowedMentions: giveawaysRole
+          ? {
+              parse: [],
+              roles: [giveawaysRole.id]
+            }
+          : undefined
       });
 
       createdGiveaway = this.giveawayStore.createGiveaway({
