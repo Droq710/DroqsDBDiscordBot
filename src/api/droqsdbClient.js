@@ -256,7 +256,10 @@ class DroqsDbClient {
     return {
       ...payload,
       apiPath: this.buildApiPath('top-profits'),
-      items: Array.isArray(payload.items) ? payload.items : []
+      items: Array.isArray(payload.items) ? payload.items : [],
+      runCount: normalizePositiveInteger(payload.runCount, 0),
+      runs: normalizePublicRunArray(payload.runs),
+      emptyStateGuidance: normalizeEmptyStateGuidance(payload?.emptyStateGuidance)
     };
   }
 
@@ -277,7 +280,8 @@ class DroqsDbClient {
       ...payload,
       requestedCountry: countryName,
       apiPath: this.buildApiPath(`country/${encodeURIComponent(countryName)}`),
-      country: payload.country || { country: countryName, items: [] }
+      country: payload.country || { country: countryName, items: [] },
+      emptyStateGuidance: normalizeEmptyStateGuidance(payload?.emptyStateGuidance)
     };
   }
 
@@ -295,7 +299,8 @@ class DroqsDbClient {
     return {
       ...payload,
       apiPath: this.buildApiPath('export'),
-      countries: Array.isArray(payload.countries) ? payload.countries : []
+      countries: Array.isArray(payload.countries) ? payload.countries : [],
+      emptyStateGuidance: normalizeEmptyStateGuidance(payload?.emptyStateGuidance)
     };
   }
 
@@ -456,7 +461,8 @@ class DroqsDbClient {
       requestedItemName: itemInput,
       resolvedItemName,
       apiPath: this.buildApiPath(`item/${encodeURIComponent(resolvedItemName)}`),
-      item: payload.item || { itemName: resolvedItemName, countries: [] }
+      item: payload.item || { itemName: resolvedItemName, countries: [] },
+      emptyStateGuidance: normalizeEmptyStateGuidance(payload?.emptyStateGuidance)
     };
   }
 
@@ -563,56 +569,17 @@ class DroqsDbClient {
     category = null
   } = {}) {
     const requestedCount = Number.parseInt(count, 10) || 10;
-    const filters = normalizeRunFilterSelections({
+    const payload = await this.getCurrentRunUniverseForFilters({
       countries,
       categories,
       country,
       category
     });
 
-    if (!filters.countries.length && !filters.categories.length) {
-      const payload = await this.getTopRuns();
-
-      return buildRunFilterResult({
-        generatedAt: payload.generatedAt,
-        apiPath: payload.apiPath,
-        countries: [],
-        categories: [],
-        runs: payload.items.slice(0, requestedCount)
-      });
-    }
-
-    if (filters.countries.length === 1 && !filters.categories.length) {
-      return this.getCurrentRunsByCountry(filters.countries[0], requestedCount);
-    }
-
-    if (!filters.countries.length && filters.categories.length === 1) {
-      return this.getCurrentRunsByCategory(filters.categories[0], requestedCount);
-    }
-
-    if (filters.countries.length === 1) {
-      const payload = await this.getCountry(filters.countries[0]);
-      const runs = filterCurrentRunsForSelections(buildCurrentRunsFromCountryPayload(payload), filters)
-        .slice(0, requestedCount);
-
-      return buildRunFilterResult({
-        generatedAt: payload.generatedAt,
-        apiPath: payload.apiPath,
-        countries: [payload.country.country],
-        categories: filters.categories,
-        runs
-      });
-    }
-
-    const payload = await this.getCurrentRunUniverseForFilters(filters);
-
-    return buildRunFilterResult({
-      generatedAt: payload.generatedAt,
-      apiPath: payload.apiPath,
-      countries: payload.countries,
-      categories: payload.categories,
+    return {
+      ...payload,
       runs: payload.runs.slice(0, requestedCount)
-    });
+    };
   }
 
   async getCurrentRunUniverseForFilters({
@@ -627,6 +594,30 @@ class DroqsDbClient {
       country,
       category
     });
+
+    const topRunsPayload = await this.getTopRuns();
+    const filteredPublicRuns =
+      topRunsPayload.runs !== null
+        ? filterRunsForSelections(topRunsPayload.runs, filters)
+        : null;
+    const hasExplicitFilters = filters.countries.length > 0 || filters.categories.length > 0;
+    const publicRunsMayBeTruncated =
+      topRunsPayload.runs !== null &&
+      normalizePositiveInteger(topRunsPayload.runCount, 0) > topRunsPayload.runs.length;
+
+    if (
+      topRunsPayload.runs !== null &&
+      (!hasExplicitFilters || filteredPublicRuns.length > 0 || !publicRunsMayBeTruncated)
+    ) {
+      return buildRunFilterResult({
+        generatedAt: topRunsPayload.generatedAt,
+        apiPath: topRunsPayload.apiPath,
+        countries: filters.countries,
+        categories: filters.categories,
+        emptyStateGuidance: topRunsPayload.emptyStateGuidance || null,
+        runs: filteredPublicRuns
+      });
+    }
 
     if (filters.countries.length === 1 && !filters.categories.length) {
       return this.getCurrentRunsByCountry(filters.countries[0], null);
@@ -860,7 +851,8 @@ function filterCurrentRunsForSelections(runs, {
       return true;
     }
 
-    const trackedCategory = getTrackedRunCategory(run?.itemName);
+    const trackedCategory =
+      normalizeTrackedRunCategory(run?.trackedCategory) || getTrackedRunCategory(run?.itemName);
     return trackedCategory ? categorySet.has(normalizeText(trackedCategory)) : false;
   });
 }
@@ -902,7 +894,7 @@ function normalizeEmptyStateGuidance(guidance) {
     return null;
   }
 
-  const kind = String(guidance.kind || '').trim();
+  const kind = normalizeText(guidance.kind || guidance.type);
 
   if (!kind) {
     return null;
@@ -915,20 +907,106 @@ function normalizeEmptyStateGuidance(guidance) {
 
   return {
     kind,
+    type: normalizeText(guidance.type || kind) || kind,
     itemName: String(guidance.itemName || '').trim() || null,
     country: String(guidance.country || '').trim() || null,
     reasonCode: String(guidance.reasonCode || '').trim() || null,
-    message: String(guidance.message || '').trim() || null,
+    messageShort:
+      String(guidance.messageShort || guidance.message || '').trim() || null,
+    messageDetailed:
+      String(guidance.messageDetailed || guidance.message || '').trim() || null,
+    message:
+      String(guidance.messageDetailed || guidance.messageShort || guidance.message || '').trim() ||
+      null,
     runKind: String(guidance.runKind || '').trim() || null,
-    departureMinutes: asMetric(guidance.departureMinutes),
+    departureMinutes: asMetric(guidance.departureMinutes ?? guidance.departInMinutes),
+    departInMinutes: asMetric(guidance.departInMinutes ?? guidance.departureMinutes),
     departureAt: guidance.departureAt || null,
+    departAtTct: String(guidance.departAtTct || '').trim() || null,
     arrivalAt: guidance.arrivalAt || null,
     restockAt: guidance.restockAt || null,
     stockoutAt: guidance.stockoutAt || null,
-    viableWindowDurationMinutes: asMetric(guidance.viableWindowDurationMinutes),
+    viableWindowDurationMinutes: asMetric(
+      guidance.viableWindowDurationMinutes ?? guidance.availabilityWindowMinutes
+    ),
+    availabilityWindowMinutes: asMetric(
+      guidance.availabilityWindowMinutes ?? guidance.viableWindowDurationMinutes
+    ),
     arrivalBufferMinutes: asMetric(guidance.arrivalBufferMinutes),
-    tightWindow: guidance.tightWindow === true
+    tightWindow: guidance.tightWindow === true || guidance.timingTight === true,
+    timingTight: guidance.timingTight === true || guidance.tightWindow === true
   };
+}
+
+function normalizePublicRunArray(runs) {
+  if (!Array.isArray(runs)) {
+    return null;
+  }
+
+  return runs
+    .map((run) => normalizePublicRun(run))
+    .filter(Boolean)
+    .filter((run) => isViablePublicRun(run));
+}
+
+function normalizePublicRun(run) {
+  if (!run || typeof run !== 'object') {
+    return null;
+  }
+
+  const itemName = String(run.itemName || '').trim();
+  const country = String(run.country || '').trim();
+
+  if (!itemName || !country) {
+    return null;
+  }
+
+  const trackedCategory =
+    normalizeTrackedRunCategory(run.category) || getTrackedRunCategory(itemName);
+  const availabilityState = normalizeText(run.availabilityState) || null;
+  const isCurrentlyInStock =
+    typeof run.isCurrentlyInStock === 'boolean' ? run.isCurrentlyInStock : Number(run.stock) > 0;
+  const isProjectedViable =
+    typeof run.isProjectedViable === 'boolean'
+      ? run.isProjectedViable
+      : availabilityState === 'projected_on_arrival';
+
+  return {
+    ...run,
+    itemName,
+    country,
+    category: String(run.category || '').trim() || null,
+    shopCategory: String(run.shopCategory || '').trim() || null,
+    trackedCategory,
+    availabilityState,
+    isCurrentlyInStock,
+    isProjectedViable,
+    departInMinutes: toMetric(run.departInMinutes),
+    availabilityWindowMinutes: toMetric(run.availabilityWindowMinutes),
+    restockEtaMinutes: toMetric(run.restockEtaMinutes),
+    timingTight: run.timingTight === true
+  };
+}
+
+function isViablePublicRun(run) {
+  if (Number(run?.profitPerMinute) <= 0) {
+    return false;
+  }
+
+  if (run?.isProjectedViable === true) {
+    return true;
+  }
+
+  if (run?.isCurrentlyInStock === true) {
+    return true;
+  }
+
+  return normalizeText(run?.availabilityState) === 'in_stock';
+}
+
+function toMetric(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
 }
 
 function normalizeFetchError(error) {

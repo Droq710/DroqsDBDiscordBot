@@ -181,7 +181,7 @@ function formatAutopostModeSummary({
       return 'Top 3 overall, by flight group, and by tracked category.';
     case AUTOPOST_MODES.TOP_N:
     default:
-      return `Top ${normalizeAutopostCount(count)} current runs.`;
+      return `Top ${normalizeAutopostCount(count)} ranked runs.`;
   }
 }
 
@@ -226,13 +226,9 @@ function buildAutopostEmptyDescription({
   categories = []
 } = {}) {
   return [
-    'DroqsDB does not currently report any profitable in-stock runs for the selected filters.',
+    'DroqsDB does not currently report any profitable viable runs for the selected filters.',
     `Filters: ${formatAutopostFilters({ countries, categories })}`
   ].join('\n');
-}
-
-function sortRunsByProfitPerMinuteDesc(left, right) {
-  return Number(right?.profitPerMinute || 0) - Number(left?.profitPerMinute || 0);
 }
 
 function getFlightGroupForRun(run) {
@@ -255,25 +251,25 @@ function buildAutopostSections({
   count = DEFAULT_AUTOPOST_COUNT
 } = {}) {
   const normalizedMode = normalizeAutopostMode(mode);
-  const sortedRuns = Array.isArray(runs) ? runs.slice().sort(sortRunsByProfitPerMinuteDesc) : [];
+  const rankedRuns = Array.isArray(runs) ? runs.slice() : [];
 
   if (normalizedMode === AUTOPOST_MODES.FLIGHT_GROUPS) {
-    return buildFlightSections(sortedRuns, 3);
+    return buildFlightSections(rankedRuns, 3);
   }
 
   if (normalizedMode === AUTOPOST_MODES.CATEGORY_GROUPS) {
-    return buildCategorySections(sortedRuns, 3);
+    return buildCategorySections(rankedRuns, 3);
   }
 
   if (normalizedMode === AUTOPOST_MODES.FULL_BREAKDOWN) {
     return [
-      buildSingleSection('overall', '🔥 Best Overall', sortedRuns.slice(0, 3)),
-      ...buildFlightSections(sortedRuns, 3),
-      ...buildCategorySections(sortedRuns, 3)
+      buildSingleSection('overall', '🔥 Best Overall', rankedRuns.slice(0, 3)),
+      ...buildFlightSections(rankedRuns, 3),
+      ...buildCategorySections(rankedRuns, 3)
     ];
   }
 
-  return [buildSingleSection('overall', '🔥 Best Overall', sortedRuns.slice(0, normalizeAutopostCount(count)))];
+  return [buildSingleSection('overall', '🔥 Best Overall', rankedRuns.slice(0, normalizeAutopostCount(count)))];
 }
 
 function parseAutopostListInput(value, {

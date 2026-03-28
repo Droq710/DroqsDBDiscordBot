@@ -315,6 +315,51 @@ function buildRunFreshnessSummary(run) {
   ]);
 }
 
+function isRunCurrentlyInStock(run) {
+  if (typeof run?.isCurrentlyInStock === 'boolean') {
+    return run.isCurrentlyInStock;
+  }
+
+  return toNumber(run?.stock) > 0;
+}
+
+function isProjectedOnArrivalRun(run) {
+  return (
+    run?.isProjectedViable === true ||
+    normalizeComparableText(run?.availabilityState) === 'projected_on_arrival'
+  );
+}
+
+function buildRunAvailabilityAnnotations(run) {
+  const annotations = [];
+  const departInMinutes = toNumber(run?.departInMinutes);
+
+  if (isProjectedOnArrivalRun(run)) {
+    if (departInMinutes !== null && departInMinutes > 0) {
+      annotations.push(`Leave in ${formatDurationMinutes(departInMinutes)}`);
+    } else if (!isRunCurrentlyInStock(run)) {
+      annotations.push('In stock on arrival');
+    } else {
+      annotations.push('Projected on arrival');
+    }
+  }
+
+  if (run?.timingTight === true) {
+    annotations.push('Tight window');
+  }
+
+  return annotations;
+}
+
+function buildRunStockSummary(run, { includeColon = true } = {}) {
+  const stockLabel = includeColon
+    ? `Stock: ${formatCount(run.stock)}`
+    : `Stock ${formatCount(run.stock)}`;
+  const annotations = buildRunAvailabilityAnnotations(run);
+
+  return annotations.length ? `${stockLabel} • ${annotations.join(' • ')}` : stockLabel;
+}
+
 function formatSourceFreshness(label, source, updatedAt) {
   return joinCompactParts([
     `${label}: ${source || 'Unknown'}`,
@@ -333,7 +378,7 @@ function runFieldValue(run, activeSellTarget, {
       `Profit/item: ${formatMoney(run.profitPerItem, { signed: true })}`
     ]),
     joinCompactParts([
-      `Stock: ${formatCount(run.stock)}`,
+      buildRunStockSummary(run),
       `Buy: ${formatMoney(run.buyPrice)}`
     ]),
     `Sell: ${buildSellPriceSummary(run, activeSellTarget)}`
@@ -627,32 +672,34 @@ function buildRunEmptyStateGuidanceEmbed({
 
   if (normalizedGuidance.kind === 'next_run') {
     const lines = ['No profitable runs are live right now.'];
+    const targetLabel = [normalizedGuidance.itemName, normalizedGuidance.country]
+      .filter(Boolean)
+      .join(' - ');
+    const timingDetails = [];
 
-    if (normalizedGuidance.itemName && normalizedGuidance.country) {
-      lines.push(
-        `Next target: **${normalizedGuidance.itemName} - ${normalizedGuidance.country}**`
-      );
-    } else if (normalizedGuidance.itemName) {
-      lines.push(`Next target: **${normalizedGuidance.itemName}**`);
-    } else if (normalizedGuidance.country) {
-      lines.push(`Next target: **${normalizedGuidance.country}**`);
+    if (targetLabel) {
+      lines.push(`Next best run: **${targetLabel}**`);
     }
 
     if (normalizedGuidance.departureMinutes !== null) {
-      lines.push(
-        `Depart in: **${formatDurationMinutes(normalizedGuidance.departureMinutes)}**`
+      timingDetails.push(
+        `Leave: **${
+          normalizedGuidance.departureMinutes <= 0
+            ? 'now'
+            : `in ${formatDurationMinutes(normalizedGuidance.departureMinutes)}`
+        }**`
       );
     }
 
-    const timingDetails = [];
+    const departAtTct = formatGuidanceDepartAtTct(normalizedGuidance);
 
-    if (normalizedGuidance.departureAt) {
-      timingDetails.push(`TCT: ${formatTctClockTime(normalizedGuidance.departureAt)}`);
+    if (departAtTct) {
+      timingDetails.push(`TCT: ${departAtTct}`);
     }
 
-    if (normalizedGuidance.viableWindowDurationMinutes !== null) {
+    if (normalizedGuidance.availabilityWindowMinutes !== null) {
       timingDetails.push(
-        `Window: ${formatDurationMinutes(normalizedGuidance.viableWindowDurationMinutes, {
+        `Window: ${formatDurationMinutes(normalizedGuidance.availabilityWindowMinutes, {
           approximate: true
         })}`
       );
@@ -663,7 +710,9 @@ function buildRunEmptyStateGuidanceEmbed({
     }
 
     if (normalizedGuidance.tightWindow) {
-      lines.push('Timing is tight, so be ready to depart quickly.');
+      lines.push('Tight window. Be ready to leave fast.');
+    } else if (!targetLabel && !timingDetails.length && normalizedGuidance.messageShort) {
+      lines.push(normalizedGuidance.messageShort);
     }
 
     return addFreshnessFooter(
@@ -679,14 +728,18 @@ function buildRunEmptyStateGuidanceEmbed({
   }
 
   if (normalizedGuidance.kind === 'timing_unreliable') {
+    const message =
+      normalizedGuidance.messageDetailed ||
+      normalizedGuidance.messageShort ||
+      normalizedGuidance.message ||
+      'Upcoming timing is too unstable to call a reliable departure window.';
+
     return addFreshnessFooter(
       buildBaseEmbed({
         title,
         description: [
           'No profitable runs are live right now.',
-          'Upcoming timing is too unstable to call a reliable departure window.',
-          normalizedGuidance.message ||
-            'Check again shortly for a cleaner restock signal.'
+          message
         ].join('\n'),
         color: COLORS.warning,
         url
@@ -726,7 +779,7 @@ function normalizeEmptyStateGuidance(guidance) {
     return null;
   }
 
-  const kind = String(guidance.kind || '').trim();
+  const kind = normalizeComparableText(guidance.kind || guidance.type);
 
   if (!kind) {
     return null;
@@ -734,25 +787,54 @@ function normalizeEmptyStateGuidance(guidance) {
 
   return {
     kind,
+    type: normalizeComparableText(guidance.type || kind) || kind,
     itemName: String(guidance.itemName || '').trim() || null,
     country: String(guidance.country || '').trim() || null,
-    message: String(guidance.message || '').trim() || null,
-    departureMinutes: toNumber(guidance.departureMinutes),
+    messageShort:
+      String(guidance.messageShort || guidance.message || '').trim() || null,
+    messageDetailed:
+      String(guidance.messageDetailed || guidance.message || '').trim() || null,
+    message:
+      String(guidance.messageDetailed || guidance.messageShort || guidance.message || '').trim() ||
+      null,
+    departureMinutes: toNumber(guidance.departureMinutes ?? guidance.departInMinutes),
+    departInMinutes: toNumber(guidance.departInMinutes ?? guidance.departureMinutes),
     departureAt: guidance.departureAt || null,
-    viableWindowDurationMinutes: toNumber(guidance.viableWindowDurationMinutes),
-    tightWindow: guidance.tightWindow === true
+    departAtTct: String(guidance.departAtTct || '').trim() || null,
+    viableWindowDurationMinutes: toNumber(
+      guidance.viableWindowDurationMinutes ?? guidance.availabilityWindowMinutes
+    ),
+    availabilityWindowMinutes: toNumber(
+      guidance.availabilityWindowMinutes ?? guidance.viableWindowDurationMinutes
+    ),
+    tightWindow: guidance.tightWindow === true || guidance.timingTight === true,
+    timingTight: guidance.timingTight === true || guidance.tightWindow === true
   };
 }
 
 function formatCompactAutopostRunLine(run) {
   return truncateText(
     joinCompactParts([
-    `**${run.itemName}** - ${run.country}`,
-    `${formatMoney(run.profitPerMinute, { signed: true })}/min`,
-    `Stock ${formatCount(run.stock)}`
+      `**${run.itemName}** - ${run.country}`,
+      `${formatMoney(run.profitPerMinute, { signed: true })}/min`,
+      buildRunStockSummary(run, { includeColon: false })
     ]),
     180
   );
+}
+
+function formatGuidanceDepartAtTct(guidance) {
+  const explicitTct = String(guidance?.departAtTct || '').trim();
+
+  if (explicitTct) {
+    return /tct/i.test(explicitTct) ? explicitTct : `${explicitTct} TCT`;
+  }
+
+  if (guidance?.departureAt) {
+    return `${formatTctClockTime(guidance.departureAt)} TCT`;
+  }
+
+  return null;
 }
 
 function buildAutopostSectionsEmbed({
