@@ -263,28 +263,27 @@ function buildCommands() {
           .addIntegerOption((option) =>
             option
               .setName('count')
-              .setDescription(`How many runs to post in Top Count mode. Defaults to ${DEFAULT_AUTOPOST_COUNT}.`)
+              .setDescription(`How many runs to post in Top N mode. Defaults to ${DEFAULT_AUTOPOST_COUNT}.`)
               .setMinValue(MIN_AUTOPOST_COUNT)
               .setMaxValue(MAX_AUTOPOST_COUNT)
           )
           .addStringOption((option) =>
             option
               .setName('mode')
-              .setDescription('Posting layout. Defaults to Top Count.')
+              .setDescription('Posting layout. Defaults to Top N.')
               .addChoices(...AUTOPOST_MODE_CHOICES)
           )
           .addStringOption((option) =>
             option
-              .setName('category')
-              .setDescription('Optional category filter.')
-              .addChoices(...RUN_CATEGORY_CHOICES)
+              .setName('categories')
+              .setDescription('Optional comma-separated categories, for example drugs,plushies.')
+              .setMaxLength(100)
           )
           .addStringOption((option) =>
-            withCountryChoices(
-              option
-                .setName('country')
-                .setDescription('Optional country filter.')
-            )
+            option
+              .setName('countries')
+              .setDescription('Optional comma-separated countries, for example canada,japan.')
+              .setMaxLength(200)
           )
       )
       .addSubcommand((subcommand) =>

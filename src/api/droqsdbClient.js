@@ -1,6 +1,9 @@
 const {
   getDefaultTrackedRoundTripHours,
-  matchesTrackedRunCategory
+  getTrackedRunCategory,
+  matchesTrackedRunCategory,
+  normalizeTrackedRunCategory,
+  resolveTrackedCountryName
 } = require('../constants/droqsdb');
 
 const COMPANION_TRAVEL_PLANNER_QUERY_PATH = '/api/companion/v1/travel-planner/query';
@@ -9,14 +12,6 @@ const DEFAULT_COMPANION_TRAVEL_PLANNER_SETTINGS = Object.freeze({
   applyTax: true,
   flightType: 'standard',
   capacity: 29
-});
-
-const COUNTRY_ALIASES = Object.freeze({
-  uk: 'United Kingdom',
-  uae: 'UAE',
-  cayman: 'Cayman Islands',
-  caymans: 'Cayman Islands',
-  sa: 'South Africa'
 });
 
 function normalizeText(value) {
@@ -374,8 +369,8 @@ class DroqsDbClient {
 
   async resolveCountryName(countryInput) {
     const countriesPayload = await this.getCountries();
-    const alias = COUNTRY_ALIASES[normalizeText(countryInput)];
-    const requested = normalizeText(alias || countryInput);
+    const localMatch = resolveTrackedCountryName(countryInput);
+    const requested = normalizeText(localMatch || countryInput);
     const match = countriesPayload.countries.find(
       (country) => normalizeText(country.country) === requested
     );
@@ -514,10 +509,7 @@ class DroqsDbClient {
   }
 
   resolveCategory(categoryInput) {
-    const requestedCategory = normalizeText(categoryInput);
-    const validCategory = ['plushies', 'flowers', 'drugs'].includes(requestedCategory)
-      ? requestedCategory
-      : null;
+    const validCategory = normalizeTrackedRunCategory(categoryInput);
 
     if (!validCategory) {
       throw new DroqsDbLookupError(`Category "${categoryInput}" is not supported.`, {
@@ -530,22 +522,16 @@ class DroqsDbClient {
 
   async getCurrentRunsByCountry(countryInput, count = 10) {
     const payload = await this.getCountry(countryInput);
-    const runs = (payload.country.items || [])
-      .filter(isCurrentProfitableRun)
-      .map((item) => ({
-        ...item,
-        country: payload.country.country
-      }))
-      .sort(sortByProfitPerMinuteDesc)
-      .slice(0, normalizeSliceCount(count));
+    const runs = buildCurrentRunsFromCountryPayload(payload).slice(0, normalizeSliceCount(count));
 
-    return {
+    return buildRunFilterResult({
       generatedAt: payload.generatedAt,
       apiPath: payload.apiPath,
-      country: payload.country.country,
+      countries: [payload.country.country],
+      categories: [],
       emptyStateGuidance: payload.emptyStateGuidance || null,
       runs
-    };
+    });
   }
 
   async getCurrentRunsByItem(itemInput, count = 3) {
@@ -571,159 +557,123 @@ class DroqsDbClient {
 
   async getCurrentRunsForFilters({
     count = 10,
+    countries = [],
+    categories = [],
     country = null,
     category = null
   } = {}) {
     const requestedCount = Number.parseInt(count, 10) || 10;
-    const requestedCountry = typeof country === 'string' && country.trim() ? country.trim() : null;
-    const requestedCategory =
-      typeof category === 'string' && category.trim()
-        ? this.resolveCategory(category)
-        : null;
+    const filters = normalizeRunFilterSelections({
+      countries,
+      categories,
+      country,
+      category
+    });
 
-    if (requestedCountry && requestedCategory) {
-      const payload = await this.getCountry(requestedCountry);
-      const runs = (payload.country.items || [])
-        .filter(isCurrentProfitableRun)
-        .filter((item) => this.matchesNamedCategory(item.itemName, requestedCategory))
-        .map((item) => ({
-          ...item,
-          country: payload.country.country
-        }))
-        .sort(sortByProfitPerMinuteDesc)
-        .slice(0, requestedCount);
+    if (!filters.countries.length && !filters.categories.length) {
+      const payload = await this.getTopRuns();
 
-      return {
+      return buildRunFilterResult({
         generatedAt: payload.generatedAt,
         apiPath: payload.apiPath,
-        country: payload.country.country,
-        category: requestedCategory,
+        countries: [],
+        categories: [],
+        runs: payload.items.slice(0, requestedCount)
+      });
+    }
+
+    if (filters.countries.length === 1 && !filters.categories.length) {
+      return this.getCurrentRunsByCountry(filters.countries[0], requestedCount);
+    }
+
+    if (!filters.countries.length && filters.categories.length === 1) {
+      return this.getCurrentRunsByCategory(filters.categories[0], requestedCount);
+    }
+
+    if (filters.countries.length === 1) {
+      const payload = await this.getCountry(filters.countries[0]);
+      const runs = filterCurrentRunsForSelections(buildCurrentRunsFromCountryPayload(payload), filters)
+        .slice(0, requestedCount);
+
+      return buildRunFilterResult({
+        generatedAt: payload.generatedAt,
+        apiPath: payload.apiPath,
+        countries: [payload.country.country],
+        categories: filters.categories,
         runs
-      };
+      });
     }
 
-    if (requestedCountry) {
-      const payload = await this.getCurrentRunsByCountry(requestedCountry, requestedCount);
-      return {
-        ...payload,
-        category: null
-      };
-    }
+    const payload = await this.getCurrentRunUniverseForFilters(filters);
 
-    if (requestedCategory) {
-      const payload = await this.getCurrentRunsByCategory(requestedCategory, requestedCount);
-      return {
-        ...payload,
-        country: null
-      };
-    }
-
-    const payload = await this.getTopRuns();
-
-    return {
+    return buildRunFilterResult({
       generatedAt: payload.generatedAt,
       apiPath: payload.apiPath,
-      country: null,
-      category: null,
-      runs: payload.items.slice(0, requestedCount)
-    };
+      countries: payload.countries,
+      categories: payload.categories,
+      runs: payload.runs.slice(0, requestedCount)
+    });
   }
 
   async getCurrentRunUniverseForFilters({
+    countries = [],
+    categories = [],
     country = null,
     category = null
   } = {}) {
-    const requestedCountry = typeof country === 'string' && country.trim() ? country.trim() : null;
-    const requestedCategory =
-      typeof category === 'string' && category.trim()
-        ? this.resolveCategory(category)
-        : null;
+    const filters = normalizeRunFilterSelections({
+      countries,
+      categories,
+      country,
+      category
+    });
 
-    if (requestedCountry && requestedCategory) {
-      const payload = await this.getCountry(requestedCountry);
-      const runs = (payload.country.items || [])
-        .filter(isCurrentProfitableRun)
-        .filter((item) => this.matchesNamedCategory(item.itemName, requestedCategory))
-        .map((item) => ({
-          ...item,
-          country: payload.country.country
-        }))
-        .sort(sortByProfitPerMinuteDesc);
+    if (filters.countries.length === 1 && !filters.categories.length) {
+      return this.getCurrentRunsByCountry(filters.countries[0], null);
+    }
 
-      return {
+    if (!filters.countries.length && filters.categories.length === 1) {
+      return this.getCurrentRunsByCategory(filters.categories[0], null);
+    }
+
+    if (filters.countries.length === 1) {
+      const payload = await this.getCountry(filters.countries[0]);
+
+      return buildRunFilterResult({
         generatedAt: payload.generatedAt,
         apiPath: payload.apiPath,
-        country: payload.country.country,
-        category: requestedCategory,
-        runs
-      };
-    }
-
-    if (requestedCountry) {
-      return this.getCurrentRunsByCountry(requestedCountry, null);
-    }
-
-    if (requestedCategory) {
-      return this.getCurrentRunsByCategory(requestedCategory, null);
+        countries: [payload.country.country],
+        categories: filters.categories,
+        runs: filterCurrentRunsForSelections(buildCurrentRunsFromCountryPayload(payload), filters)
+      });
     }
 
     const payload = await this.getExport();
-    const runs = [];
 
-    for (const countryRow of payload.countries) {
-      for (const item of countryRow.items || []) {
-        if (!isCurrentProfitableRun(item)) {
-          continue;
-        }
-
-        runs.push({
-          ...item,
-          country: countryRow.country
-        });
-      }
-    }
-
-    runs.sort(sortByProfitPerMinuteDesc);
-
-    return {
+    return buildRunFilterResult({
       generatedAt: payload.generatedAt,
       apiPath: payload.apiPath,
-      country: null,
-      category: null,
-      runs
-    };
+      countries: filters.countries,
+      categories: filters.categories,
+      runs: filterCurrentRunsForSelections(buildCurrentRunsFromExportPayload(payload), filters)
+    });
   }
 
   async getCurrentRunsByCategory(categoryInput, count = 10) {
     const validCategory = this.resolveCategory(categoryInput);
     const payload = await this.getExport();
-    const runs = [];
+    const runs = filterCurrentRunsForSelections(buildCurrentRunsFromExportPayload(payload), {
+      countries: [],
+      categories: [validCategory]
+    }).slice(0, normalizeSliceCount(count));
 
-    for (const country of payload.countries) {
-      for (const item of country.items || []) {
-        if (!this.matchesNamedCategory(item.itemName, validCategory)) {
-          continue;
-        }
-
-        if (!isCurrentProfitableRun(item)) {
-          continue;
-        }
-
-        runs.push({
-          ...item,
-          country: country.country
-        });
-      }
-    }
-
-    runs.sort(sortByProfitPerMinuteDesc);
-
-    return {
+    return buildRunFilterResult({
       generatedAt: payload.generatedAt,
       apiPath: payload.apiPath,
-      category: validCategory,
-      runs: runs.slice(0, normalizeSliceCount(count))
-    };
+      countries: [],
+      categories: [validCategory],
+      runs
+    });
   }
 
   matchesNamedCategory(itemName, category) {
@@ -775,12 +725,144 @@ function normalizeSliceCount(count) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : Number.MAX_SAFE_INTEGER;
 }
 
+function toSelectionArray(value) {
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (value === null || value === undefined) {
+    return [];
+  }
+
+  return [value];
+}
+
 function normalizeStringArray(values) {
   return Array.isArray(values)
     ? values
         .map((value) => String(value || '').trim())
         .filter(Boolean)
     : [];
+}
+
+function normalizeResolvedSelectionArray(values, resolveValue) {
+  const normalized = [];
+  const seen = new Set();
+
+  for (const value of normalizeStringArray(toSelectionArray(values))) {
+    const resolvedValue = resolveValue(value);
+
+    if (!resolvedValue) {
+      continue;
+    }
+
+    const key = normalizeText(resolvedValue);
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      normalized.push(resolvedValue);
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeRunFilterSelections({
+  countries = [],
+  categories = [],
+  country = null,
+  category = null
+} = {}) {
+  return {
+    countries: normalizeResolvedSelectionArray(
+      [...toSelectionArray(countries), ...toSelectionArray(country)],
+      resolveTrackedCountryName
+    ),
+    categories: normalizeResolvedSelectionArray(
+      [...toSelectionArray(categories), ...toSelectionArray(category)],
+      normalizeTrackedRunCategory
+    )
+  };
+}
+
+function buildRunFilterResult({
+  generatedAt,
+  apiPath,
+  countries = [],
+  categories = [],
+  emptyStateGuidance = null,
+  runs = []
+}) {
+  const filters = normalizeRunFilterSelections({
+    countries,
+    categories
+  });
+
+  return {
+    generatedAt,
+    apiPath,
+    country: filters.countries.length === 1 ? filters.countries[0] : null,
+    category: filters.categories.length === 1 ? filters.categories[0] : null,
+    countries: filters.countries,
+    categories: filters.categories,
+    emptyStateGuidance,
+    runs
+  };
+}
+
+function buildCurrentRunsFromCountryPayload(payload) {
+  return (payload?.country?.items || [])
+    .filter(isCurrentProfitableRun)
+    .map((item) => ({
+      ...item,
+      country: payload.country.country
+    }))
+    .sort(sortByProfitPerMinuteDesc);
+}
+
+function buildCurrentRunsFromExportPayload(payload) {
+  const runs = [];
+
+  for (const countryRow of payload?.countries || []) {
+    for (const item of countryRow.items || []) {
+      if (!isCurrentProfitableRun(item)) {
+        continue;
+      }
+
+      runs.push({
+        ...item,
+        country: countryRow.country
+      });
+    }
+  }
+
+  runs.sort(sortByProfitPerMinuteDesc);
+  return runs;
+}
+
+function filterCurrentRunsForSelections(runs, {
+  countries = [],
+  categories = []
+} = {}) {
+  const countrySet = countries.length
+    ? new Set(countries.map((country) => normalizeText(country)))
+    : null;
+  const categorySet = categories.length
+    ? new Set(categories.map((category) => normalizeText(category)))
+    : null;
+
+  return runs.filter((run) => {
+    if (countrySet && !countrySet.has(normalizeText(run?.country))) {
+      return false;
+    }
+
+    if (!categorySet) {
+      return true;
+    }
+
+    const trackedCategory = getTrackedRunCategory(run?.itemName);
+    return trackedCategory ? categorySet.has(normalizeText(trackedCategory)) : false;
+  });
 }
 
 function normalizeRoundTripHours(value) {

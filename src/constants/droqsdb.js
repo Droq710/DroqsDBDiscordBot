@@ -12,6 +12,14 @@ const COUNTRY_CHOICES = Object.freeze([
   'United Kingdom'
 ]);
 
+const TRACKED_COUNTRY_ALIASES = Object.freeze({
+  uk: 'United Kingdom',
+  uae: 'UAE',
+  cayman: 'Cayman Islands',
+  caymans: 'Cayman Islands',
+  sa: 'South Africa'
+});
+
 const RUN_CATEGORY_CHOICES = Object.freeze([
   { name: 'Plushies', value: 'plushies' },
   { name: 'Flowers', value: 'flowers' },
@@ -88,7 +96,7 @@ function normalizeDroqsdbText(value) {
 }
 
 function categoryLabel(category) {
-  const normalized = normalizeDroqsdbText(category);
+  const normalized = normalizeTrackedRunCategory(category);
   const match = RUN_CATEGORY_CHOICES.find((entry) => entry.value === normalized);
 
   if (match) {
@@ -100,6 +108,26 @@ function categoryLabel(category) {
   }
 
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function normalizeTrackedRunCategory(category) {
+  const normalized = normalizeDroqsdbText(category);
+  return RUN_CATEGORY_CHOICES.some((entry) => entry.value === normalized) ? normalized : null;
+}
+
+function resolveTrackedCountryName(countryInput) {
+  const normalizedInput = normalizeDroqsdbText(countryInput);
+
+  if (!normalizedInput) {
+    return null;
+  }
+
+  const aliasedCountry = TRACKED_COUNTRY_ALIASES[normalizedInput] || countryInput;
+  const normalizedCountry = normalizeDroqsdbText(aliasedCountry);
+
+  return (
+    COUNTRY_CHOICES.find((country) => normalizeDroqsdbText(country) === normalizedCountry) || null
+  );
 }
 
 function matchesTrackedRunCategory(itemName, category) {
@@ -143,5 +171,7 @@ module.exports = {
   getStandardRoundTripMinutes,
   getTrackedRunCategory,
   matchesTrackedRunCategory,
-  normalizeDroqsdbText
+  normalizeDroqsdbText,
+  normalizeTrackedRunCategory,
+  resolveTrackedCountryName
 };

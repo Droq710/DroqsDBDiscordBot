@@ -745,14 +745,17 @@ function normalizeEmptyStateGuidance(guidance) {
 }
 
 function formatCompactAutopostRunLine(run) {
-  return joinCompactParts([
+  return truncateText(
+    joinCompactParts([
     `**${run.itemName}** - ${run.country}`,
     `${formatMoney(run.profitPerMinute, { signed: true })}/min`,
     `Stock ${formatCount(run.stock)}`
-  ]);
+    ]),
+    180
+  );
 }
 
-function buildAutopostBucketEmbed({
+function buildAutopostSectionsEmbed({
   title,
   description,
   sections,
@@ -769,61 +772,10 @@ function buildAutopostBucketEmbed({
   for (const section of sections) {
     embed.addFields({
       name: section.title,
-      value: section.runs.length
-        ? section.runs
-            .map((run, index) => `${index + 1}. ${formatCompactAutopostRunLine(run)}`)
-            .join('\n')
-        : 'No qualifying runs right now.',
+      value: buildAutopostSectionValue(section),
       inline: false
     });
   }
-
-  return addFreshnessFooter(embed, generatedAt);
-}
-
-function buildAutopostHighlightsEmbed({
-  title,
-  description,
-  highlights,
-  generatedAt,
-  url
-}) {
-  const embed = buildBaseEmbed({
-    title,
-    description,
-    color: COLORS.success,
-    url
-  });
-  const formatHighlightLine = (label, run) =>
-    `${label}: ${run ? formatCompactAutopostRunLine(run) : 'No qualifying run right now.'}`;
-
-  embed.addFields(
-    {
-      name: 'Overall',
-      value: highlights.overall
-        ? formatCompactAutopostRunLine(highlights.overall)
-        : 'No qualifying run right now.',
-      inline: false
-    },
-    {
-      name: 'By Category',
-      value: [
-        formatHighlightLine('Plushie', highlights.plushies),
-        formatHighlightLine('Flower', highlights.flowers),
-        formatHighlightLine('Drug', highlights.drugs)
-      ].join('\n'),
-      inline: false
-    },
-    {
-      name: 'By Flight Length',
-      value: [
-        formatHighlightLine('Short', highlights.short),
-        formatHighlightLine('Medium', highlights.medium),
-        formatHighlightLine('Long Haul', highlights.long)
-      ].join('\n'),
-      inline: false
-    }
-  );
 
   return addFreshnessFooter(embed, generatedAt);
 }
@@ -966,9 +918,65 @@ function formatHelpEntryLine(entry) {
   return summary ? `\`${entry.name}\` - ${summary}` : `\`${entry.name}\``;
 }
 
+function buildAutopostSectionValue(section) {
+  const lines = section.runs.length
+    ? section.runs.map((run, index) => `${index + 1}. ${formatCompactAutopostRunLine(run)}`)
+    : ['No qualifying runs right now.'];
+
+  return truncateLines(lines, 1024);
+}
+
+function truncateLines(lines, maxLength) {
+  const normalizedLines = Array.isArray(lines) ? lines.filter(Boolean) : [];
+  const keptLines = [];
+  let usedLength = 0;
+
+  for (const line of normalizedLines) {
+    const additionLength = line.length + (keptLines.length ? 1 : 0);
+
+    if (usedLength + additionLength > maxLength) {
+      break;
+    }
+
+    keptLines.push(line);
+    usedLength += additionLength;
+  }
+
+  const omittedCount = normalizedLines.length - keptLines.length;
+
+  if (!omittedCount) {
+    return keptLines.join('\n');
+  }
+
+  const overflowLabel = `... +${omittedCount} more`;
+
+  while (
+    keptLines.length &&
+    keptLines.join('\n').length + 1 + overflowLabel.length > maxLength
+  ) {
+    keptLines.pop();
+  }
+
+  if (!keptLines.length) {
+    return truncateText(overflowLabel, maxLength);
+  }
+
+  keptLines.push(overflowLabel);
+  return keptLines.join('\n');
+}
+
+function truncateText(value, maxLength) {
+  const normalizedValue = String(value || '');
+
+  if (normalizedValue.length <= maxLength) {
+    return normalizedValue;
+  }
+
+  return `${normalizedValue.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
 module.exports = {
-  buildAutopostBucketEmbed,
-  buildAutopostHighlightsEmbed,
+  buildAutopostSectionsEmbed,
   buildAutopostStatusEmbed,
   buildBestRunEmbed,
   buildErrorEmbed,

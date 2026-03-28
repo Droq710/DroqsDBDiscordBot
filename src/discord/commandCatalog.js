@@ -42,7 +42,7 @@ const COMMAND_HELP_ENTRIES = Object.freeze([
   {
     name: '/autopost enable',
     value:
-      'Usage: `/autopost enable channel:<channel> [count:<1-10>] [mode] [category] [country]`\nTurns on hourly guild autoposts. Modes: Top Count, Flight Buckets, Mixed Highlights. Requires `Manage Server`.'
+      'Usage: `/autopost enable channel:<channel> [count:<1-10>] [mode] [categories:<csv>] [countries:<csv>]`\nTurns on hourly guild autoposts. Modes: Top N, Flight Groups, Category Groups, Full Breakdown. Requires `Manage Server`.'
   },
   {
     name: '/autopost disable',

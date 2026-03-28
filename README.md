@@ -23,7 +23,7 @@ The bot stays intentionally thin:
 - `/price item:<item name>`
 - `/stock item:<item name> country:<country>`
 - `/restock item:<item name> country:<country>`
-- `/autopost enable channel:<channel> [count:<1-10>] [category:<plushies|flowers|drugs>] [country:<country>]`
+- `/autopost enable channel:<channel> [count:<1-10>] [mode:<top_n|flight_groups|category_groups|full_breakdown>] [categories:<csv>] [countries:<csv>]`
 - `/autopost disable`
 - `/autopost status`
 
@@ -118,7 +118,7 @@ It does not store Discord message history, and DroqsDB remains the source of tru
 ## Autopost Behavior
 
 - `/autopost enable` stores per-guild autopost settings in SQLite
-- each guild keeps enabled or disabled state, channel, count, and optional country or category filters
+- each guild keeps enabled or disabled state, channel, mode, count, and optional country/category filter arrays
 - the scheduler loops through enabled guilds every hour
 - overlapping scheduler runs are skipped defensively
 - invalid or unsendable channel configs are disabled automatically with warning logs

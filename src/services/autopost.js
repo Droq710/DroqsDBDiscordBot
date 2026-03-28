@@ -2,18 +2,15 @@ const cron = require('node-cron');
 const { PermissionFlagsBits } = require('discord.js');
 const { DroqsDbApiError } = require('../api/droqsdbClient');
 const {
-  buildAutopostBucketEmbed,
-  buildAutopostHighlightsEmbed,
-  buildInfoEmbed,
-  buildRunListEmbed
+  buildAutopostSectionsEmbed,
+  buildRunEmptyStateGuidanceEmbed
 } = require('../utils/formatters');
 const {
   AUTOPOST_MODES,
-  buildAutopostFlightBucketSections,
-  buildAutopostMixedHighlights,
   buildAutopostDescription,
   buildAutopostEmptyDescription,
   buildAutopostEmptyTitle,
+  buildAutopostSections,
   buildAutopostTitle,
   formatAutopostFilters,
   normalizeAutopostMode
@@ -80,7 +77,9 @@ class AutopostService {
     guildId,
     channelId,
     count,
-    mode = AUTOPOST_MODES.COUNT,
+    mode = AUTOPOST_MODES.TOP_N,
+    countries = [],
+    categories = [],
     country = null,
     category = null,
     updatedBy
@@ -90,6 +89,8 @@ class AutopostService {
       channelId,
       count,
       mode,
+      countries,
+      categories,
       country,
       category,
       updatedBy
@@ -158,15 +159,15 @@ class AutopostService {
 
     try {
       payload =
-        mode === AUTOPOST_MODES.COUNT
+        mode === AUTOPOST_MODES.TOP_N
           ? await this.droqsdbClient.getCurrentRunsForFilters({
               count: guildConfig.count,
-              country: guildConfig.country,
-              category: guildConfig.category
+              countries: guildConfig.countries,
+              categories: guildConfig.categories
             })
           : await this.droqsdbClient.getCurrentRunUniverseForFilters({
-              country: guildConfig.country,
-              category: guildConfig.category
+              countries: guildConfig.countries,
+              categories: guildConfig.categories
             });
     } catch (error) {
       if (error instanceof DroqsDbApiError && (error.upstreamUnavailable || error.retryable)) {
@@ -182,27 +183,32 @@ class AutopostService {
       return;
     }
 
-    const targetCountry = payload.country || guildConfig.country;
-    const targetCategory = payload.category || guildConfig.category;
+    const targetCountries = payload.countries?.length ? payload.countries : guildConfig.countries;
+    const targetCategories = payload.categories?.length
+      ? payload.categories
+      : guildConfig.categories;
     const embed = payload.runs.length
       ? this.buildAutopostEmbed({
           mode,
           payload,
-          targetCountry,
-          targetCategory,
+          targetCountries,
+          targetCategories,
           count: guildConfig.count
         })
-      : buildInfoEmbed(
-          buildAutopostEmptyTitle({
-            country: targetCountry,
-            category: targetCategory
+      : buildRunEmptyStateGuidanceEmbed({
+          title: buildAutopostEmptyTitle({
+            countries: targetCountries,
+            categories: targetCategories
           }),
-          buildAutopostEmptyDescription({
-            country: targetCountry,
-            category: targetCategory
+          fallbackDescription: buildAutopostEmptyDescription({
+            countries: targetCountries,
+            categories: targetCategories
           }),
-          { url: this.droqsdbClient.webBaseUrl }
-        );
+          guidance: payload.emptyStateGuidance || null,
+          generatedAt: payload.generatedAt,
+          sourceLabel: 'DroqsDB Public API',
+          url: this.droqsdbClient.webBaseUrl
+        });
 
     try {
       await channel.send({
@@ -299,62 +305,28 @@ class AutopostService {
   buildAutopostEmbed({
     mode,
     payload,
-    targetCountry,
-    targetCategory,
+    targetCountries,
+    targetCategories,
     count
   }) {
-    if (mode === AUTOPOST_MODES.FLIGHT_BUCKETS) {
-      return buildAutopostBucketEmbed({
-        title: buildAutopostTitle({
-          mode,
-          country: targetCountry,
-          category: targetCategory
-        }),
-        description: buildAutopostDescription({
-          mode,
-          country: targetCountry,
-          category: targetCategory
-        }),
-        sections: buildAutopostFlightBucketSections(payload.runs, 3),
-        generatedAt: payload.generatedAt,
-        url: this.droqsdbClient.webBaseUrl
-      });
-    }
-
-    if (mode === AUTOPOST_MODES.MIXED_HIGHLIGHTS) {
-      return buildAutopostHighlightsEmbed({
-        title: buildAutopostTitle({
-          mode,
-          country: targetCountry,
-          category: targetCategory
-        }),
-        description: buildAutopostDescription({
-          mode,
-          country: targetCountry,
-          category: targetCategory
-        }),
-        highlights: buildAutopostMixedHighlights(payload.runs),
-        generatedAt: payload.generatedAt,
-        url: this.droqsdbClient.webBaseUrl
-      });
-    }
-
-    return buildRunListEmbed({
+    return buildAutopostSectionsEmbed({
       title: buildAutopostTitle({
         mode,
-        country: targetCountry,
-        category: targetCategory,
-        count: payload.runs.length
+        count
       }),
       description: buildAutopostDescription({
         mode,
-        country: targetCountry,
-        category: targetCategory
+        count,
+        countries: targetCountries,
+        categories: targetCategories
       }),
-      runs: payload.runs,
+      sections: buildAutopostSections({
+        mode,
+        runs: payload.runs,
+        count
+      }),
       generatedAt: payload.generatedAt,
-      url: this.droqsdbClient.webBaseUrl,
-      activeSellTarget: 'market'
+      url: this.droqsdbClient.webBaseUrl
     });
   }
 }

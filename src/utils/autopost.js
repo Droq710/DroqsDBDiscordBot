@@ -1,7 +1,11 @@
 const {
+  COUNTRY_CHOICES,
+  RUN_CATEGORY_CHOICES,
   categoryLabel,
   getStandardRoundTripMinutes,
-  getTrackedRunCategory
+  getTrackedRunCategory,
+  normalizeTrackedRunCategory,
+  resolveTrackedCountryName
 } = require('../constants/droqsdb');
 
 const DEFAULT_AUTOPOST_COUNT = 10;
@@ -9,40 +13,60 @@ const MIN_AUTOPOST_COUNT = 1;
 const MAX_AUTOPOST_COUNT = 10;
 
 const AUTOPOST_MODES = Object.freeze({
-  COUNT: 'count',
-  FLIGHT_BUCKETS: 'flight_buckets',
-  MIXED_HIGHLIGHTS: 'mixed_highlights'
+  TOP_N: 'top_n',
+  FLIGHT_GROUPS: 'flight_groups',
+  CATEGORY_GROUPS: 'category_groups',
+  FULL_BREAKDOWN: 'full_breakdown'
 });
 
 const AUTOPOST_MODE_CHOICES = Object.freeze([
-  { name: 'Top Count', value: AUTOPOST_MODES.COUNT },
-  { name: 'Flight Buckets', value: AUTOPOST_MODES.FLIGHT_BUCKETS },
-  { name: 'Mixed Highlights', value: AUTOPOST_MODES.MIXED_HIGHLIGHTS }
+  { name: 'Top N', value: AUTOPOST_MODES.TOP_N },
+  { name: 'Flight Groups', value: AUTOPOST_MODES.FLIGHT_GROUPS },
+  { name: 'Category Groups', value: AUTOPOST_MODES.CATEGORY_GROUPS },
+  { name: 'Full Breakdown', value: AUTOPOST_MODES.FULL_BREAKDOWN }
 ]);
 
-const FLIGHT_BUCKETS = Object.freeze([
+const FLIGHT_GROUPS = Object.freeze([
   Object.freeze({
     key: 'short',
-    title: 'Short Flights (<= 2h RT)',
-    summaryLabel: 'Short',
+    title: '✈️ Short Flights',
     minMinutes: 0,
-    maxMinutes: 120
+    maxMinutes: 180
   }),
   Object.freeze({
     key: 'medium',
-    title: 'Medium Flights (2h-6h RT)',
-    summaryLabel: 'Medium',
-    minMinutes: 121,
-    maxMinutes: 360
+    title: '🛫 Medium Flights',
+    minMinutes: 181,
+    maxMinutes: 480
   }),
   Object.freeze({
     key: 'long',
-    title: 'Long Haul (> 6h RT)',
-    summaryLabel: 'Long Haul',
-    minMinutes: 361,
+    title: '🌍 Long Haul',
+    minMinutes: 481,
     maxMinutes: Number.POSITIVE_INFINITY
   })
 ]);
+
+const CATEGORY_GROUPS = Object.freeze([
+  Object.freeze({
+    key: 'drugs',
+    title: '💊 Drugs'
+  }),
+  Object.freeze({
+    key: 'flowers',
+    title: '🌸 Flowers'
+  }),
+  Object.freeze({
+    key: 'plushies',
+    title: '🧸 Plushies'
+  })
+]);
+
+const LEGACY_AUTOPOST_MODE_ALIASES = Object.freeze({
+  count: AUTOPOST_MODES.TOP_N,
+  flight_buckets: AUTOPOST_MODES.TOP_N,
+  mixed_highlights: AUTOPOST_MODES.TOP_N
+});
 
 function normalizeAutopostCount(value, fallback = DEFAULT_AUTOPOST_COUNT) {
   const parsed = Number.parseInt(value, 10);
@@ -54,49 +78,77 @@ function normalizeAutopostCount(value, fallback = DEFAULT_AUTOPOST_COUNT) {
   return Math.min(MAX_AUTOPOST_COUNT, Math.max(MIN_AUTOPOST_COUNT, parsed));
 }
 
-function normalizeAutopostMode(value, fallback = AUTOPOST_MODES.COUNT) {
+function normalizeAutopostMode(value, fallback = AUTOPOST_MODES.TOP_N) {
   const normalized = String(value || '')
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_');
 
-  if (normalized === AUTOPOST_MODES.FLIGHT_BUCKETS) {
-    return AUTOPOST_MODES.FLIGHT_BUCKETS;
+  if (Object.values(AUTOPOST_MODES).includes(normalized)) {
+    return normalized;
   }
 
-  if (normalized === AUTOPOST_MODES.MIXED_HIGHLIGHTS) {
-    return AUTOPOST_MODES.MIXED_HIGHLIGHTS;
-  }
+  return LEGACY_AUTOPOST_MODE_ALIASES[normalized] || fallback;
+}
 
-  if (normalized === AUTOPOST_MODES.COUNT) {
-    return AUTOPOST_MODES.COUNT;
-  }
+function parseAutopostCategoryInput(value) {
+  return parseAutopostListInput(value, {
+    fieldLabel: 'categories',
+    validValues: RUN_CATEGORY_CHOICES.map((entry) => entry.value),
+    resolveValue: normalizeTrackedRunCategory,
+    strict: true
+  });
+}
 
-  return fallback;
+function parseAutopostCountryInput(value) {
+  return parseAutopostListInput(value, {
+    fieldLabel: 'countries',
+    validValues: COUNTRY_CHOICES,
+    resolveValue: resolveTrackedCountryName,
+    strict: true
+  });
 }
 
 function normalizeAutopostFilters({
+  countries = [],
+  categories = [],
   country = null,
   category = null
 } = {}) {
   return {
-    country: typeof country === 'string' && country.trim() ? country.trim() : null,
-    category: typeof category === 'string' && category.trim() ? category.trim().toLowerCase() : null
+    countries: parseAutopostListInput([countries, country], {
+      fieldLabel: 'countries',
+      validValues: COUNTRY_CHOICES,
+      resolveValue: resolveTrackedCountryName,
+      strict: false
+    }).values,
+    categories: parseAutopostListInput([categories, category], {
+      fieldLabel: 'categories',
+      validValues: RUN_CATEGORY_CHOICES.map((entry) => entry.value),
+      resolveValue: normalizeTrackedRunCategory,
+      strict: false
+    }).values
   };
 }
 
 function formatAutopostFilters({
-  country = null,
-  category = null
+  countries = [],
+  categories = []
 } = {}) {
+  const normalizedFilters = normalizeAutopostFilters({
+    countries,
+    categories
+  });
   const parts = [];
 
-  if (country) {
-    parts.push(`Country: ${country}`);
+  if (normalizedFilters.countries.length) {
+    parts.push(`Countries: ${normalizedFilters.countries.join(', ')}`);
   }
 
-  if (category) {
-    parts.push(`Category: ${categoryLabel(category)}`);
+  if (normalizedFilters.categories.length) {
+    parts.push(
+      `Categories: ${normalizedFilters.categories.map((category) => categoryLabel(category)).join(', ')}`
+    );
   }
 
   return parts.length ? parts.join(' | ') : 'All profitable runs';
@@ -104,183 +156,86 @@ function formatAutopostFilters({
 
 function formatAutopostMode(mode) {
   switch (normalizeAutopostMode(mode)) {
-    case AUTOPOST_MODES.FLIGHT_BUCKETS:
-      return 'Flight Buckets';
-    case AUTOPOST_MODES.MIXED_HIGHLIGHTS:
-      return 'Mixed Highlights';
-    case AUTOPOST_MODES.COUNT:
+    case AUTOPOST_MODES.FLIGHT_GROUPS:
+      return 'Flight Groups';
+    case AUTOPOST_MODES.CATEGORY_GROUPS:
+      return 'Category Groups';
+    case AUTOPOST_MODES.FULL_BREAKDOWN:
+      return 'Full Breakdown';
+    case AUTOPOST_MODES.TOP_N:
     default:
-      return 'Top Count';
+      return 'Top N';
   }
 }
 
 function formatAutopostModeSummary({
-  mode = AUTOPOST_MODES.COUNT,
+  mode = AUTOPOST_MODES.TOP_N,
   count = DEFAULT_AUTOPOST_COUNT
 } = {}) {
   switch (normalizeAutopostMode(mode)) {
-    case AUTOPOST_MODES.FLIGHT_BUCKETS:
+    case AUTOPOST_MODES.FLIGHT_GROUPS:
       return 'Top 3 short, medium, and long-haul runs.';
-    case AUTOPOST_MODES.MIXED_HIGHLIGHTS:
-      return 'Top overall, top plushie, top flower, top drug, and top short, medium, and long-haul runs.';
-    case AUTOPOST_MODES.COUNT:
+    case AUTOPOST_MODES.CATEGORY_GROUPS:
+      return 'Top 3 runs each for drugs, flowers, and plushies.';
+    case AUTOPOST_MODES.FULL_BREAKDOWN:
+      return 'Top 3 overall, by flight group, and by tracked category.';
+    case AUTOPOST_MODES.TOP_N:
     default:
       return `Top ${normalizeAutopostCount(count)} current runs.`;
   }
 }
 
 function buildAutopostTitle({
-  mode = AUTOPOST_MODES.COUNT,
-  country = null,
-  category = null,
+  mode = AUTOPOST_MODES.TOP_N,
   count = DEFAULT_AUTOPOST_COUNT
 } = {}) {
-  const normalizedMode = normalizeAutopostMode(mode);
-
-  if (normalizedMode === AUTOPOST_MODES.FLIGHT_BUCKETS) {
-    if (country && category) {
-      return `Hourly ${categoryLabel(category)} Flight Buckets for ${country}`;
-    }
-
-    if (country) {
-      return `Hourly Flight Buckets for ${country}`;
-    }
-
-    if (category) {
-      return `Hourly ${categoryLabel(category)} Flight Buckets`;
-    }
-
-    return 'Hourly DroqsDB Flight Buckets';
+  switch (normalizeAutopostMode(mode)) {
+    case AUTOPOST_MODES.FLIGHT_GROUPS:
+      return 'Hourly DroqsDB Flight Groups';
+    case AUTOPOST_MODES.CATEGORY_GROUPS:
+      return 'Hourly DroqsDB Category Groups';
+    case AUTOPOST_MODES.FULL_BREAKDOWN:
+      return 'Hourly DroqsDB Full Breakdown';
+    case AUTOPOST_MODES.TOP_N:
+    default:
+      return `Hourly DroqsDB Top ${normalizeAutopostCount(count)} Runs`;
   }
-
-  if (normalizedMode === AUTOPOST_MODES.MIXED_HIGHLIGHTS) {
-    if (country && category) {
-      return `Hourly ${categoryLabel(category)} Highlights for ${country}`;
-    }
-
-    if (country) {
-      return `Hourly Highlights for ${country}`;
-    }
-
-    if (category) {
-      return `Hourly ${categoryLabel(category)} Highlights`;
-    }
-
-    return 'Hourly DroqsDB Highlights';
-  }
-
-  if (country && category) {
-    return `Hourly ${categoryLabel(category)} Runs for ${country}`;
-  }
-
-  if (country) {
-    return `Hourly Runs for ${country}`;
-  }
-
-  if (category) {
-    return `Hourly ${categoryLabel(category)} Runs`;
-  }
-
-  return `Hourly DroqsDB Top ${count} Runs`;
 }
 
 function buildAutopostDescription({
-  mode = AUTOPOST_MODES.COUNT,
-  country = null,
-  category = null
+  mode = AUTOPOST_MODES.TOP_N,
+  count = DEFAULT_AUTOPOST_COUNT,
+  countries = [],
+  categories = []
 } = {}) {
-  const normalizedMode = normalizeAutopostMode(mode);
-
-  if (normalizedMode === AUTOPOST_MODES.FLIGHT_BUCKETS) {
-    if (country && category) {
-      return `Current profitable in-stock ${categoryLabel(category).toLowerCase()} runs for ${country}, grouped by standard round-trip flight length.`;
-    }
-
-    if (country) {
-      return `Current profitable in-stock runs for ${country}, grouped by standard round-trip flight length.`;
-    }
-
-    if (category) {
-      return `Current profitable in-stock ${categoryLabel(category).toLowerCase()} runs, grouped by standard round-trip flight length.`;
-    }
-
-    return 'Current profitable in-stock runs grouped by standard round-trip flight length.';
-  }
-
-  if (normalizedMode === AUTOPOST_MODES.MIXED_HIGHLIGHTS) {
-    if (country && category) {
-      return `Current profitable in-stock ${categoryLabel(category).toLowerCase()} highlight runs for ${country}.`;
-    }
-
-    if (country) {
-      return `Current profitable in-stock highlight runs for ${country}.`;
-    }
-
-    if (category) {
-      return `Current profitable in-stock ${categoryLabel(category).toLowerCase()} highlight runs.`;
-    }
-
-    return 'Current profitable in-stock highlight runs.';
-  }
-
-  if (country && category) {
-    return `Current profitable in-stock ${categoryLabel(category).toLowerCase()} runs for ${country} from the DroqsDB Public API.`;
-  }
-
-  if (country) {
-    return `Current profitable in-stock runs for ${country} from the DroqsDB Public API.`;
-  }
-
-  if (category) {
-    return `Current profitable in-stock ${categoryLabel(category).toLowerCase()} runs from the DroqsDB Public API.`;
-  }
-
-  return 'Current top profitable in-stock runs from the DroqsDB Public API.';
+  return [
+    formatAutopostModeSummary({
+      mode,
+      count
+    }),
+    `Filters: ${formatAutopostFilters({ countries, categories })}`
+  ].join('\n');
 }
 
-function buildAutopostEmptyTitle({
-  country = null,
-  category = null
-} = {}) {
-  if (country && category) {
-    return `No ${categoryLabel(category)} Runs for ${country}`;
-  }
-
-  if (country) {
-    return `No Runs for ${country}`;
-  }
-
-  if (category) {
-    return `No ${categoryLabel(category)} Runs`;
-  }
-
-  return 'No Profitable Runs Available';
+function buildAutopostEmptyTitle() {
+  return 'No Matching Runs';
 }
 
 function buildAutopostEmptyDescription({
-  country = null,
-  category = null
+  countries = [],
+  categories = []
 } = {}) {
-  if (country && category) {
-    return `DroqsDB does not currently report any profitable in-stock ${categoryLabel(category).toLowerCase()} runs for ${country}.`;
-  }
-
-  if (country) {
-    return `DroqsDB does not currently report any profitable in-stock runs for ${country}.`;
-  }
-
-  if (category) {
-    return `DroqsDB does not currently report any profitable in-stock ${categoryLabel(category).toLowerCase()} runs right now.`;
-  }
-
-  return 'DroqsDB does not currently report any profitable in-stock runs right now.';
+  return [
+    'DroqsDB does not currently report any profitable in-stock runs for the selected filters.',
+    `Filters: ${formatAutopostFilters({ countries, categories })}`
+  ].join('\n');
 }
 
 function sortRunsByProfitPerMinuteDesc(left, right) {
   return Number(right?.profitPerMinute || 0) - Number(left?.profitPerMinute || 0);
 }
 
-function getFlightBucketForRun(run) {
+function getFlightGroupForRun(run) {
   const roundTripMinutes = getStandardRoundTripMinutes(run?.country);
 
   if (!Number.isFinite(roundTripMinutes)) {
@@ -288,57 +243,136 @@ function getFlightBucketForRun(run) {
   }
 
   return (
-    FLIGHT_BUCKETS.find(
-      (bucket) => roundTripMinutes >= bucket.minMinutes && roundTripMinutes <= bucket.maxMinutes
+    FLIGHT_GROUPS.find(
+      (group) => roundTripMinutes >= group.minMinutes && roundTripMinutes <= group.maxMinutes
     ) || null
   );
 }
 
-function buildAutopostFlightBucketSections(runs, limit = 3) {
+function buildAutopostSections({
+  mode = AUTOPOST_MODES.TOP_N,
+  runs = [],
+  count = DEFAULT_AUTOPOST_COUNT
+} = {}) {
+  const normalizedMode = normalizeAutopostMode(mode);
   const sortedRuns = Array.isArray(runs) ? runs.slice().sort(sortRunsByProfitPerMinuteDesc) : [];
-  const normalizedLimit = Math.max(1, Math.round(Number(limit) || 3));
 
-  return FLIGHT_BUCKETS.map((bucket) => ({
-    key: bucket.key,
-    title: bucket.title,
-    runs: sortedRuns
-      .filter((run) => getFlightBucketForRun(run)?.key === bucket.key)
-      .slice(0, normalizedLimit)
-  }));
+  if (normalizedMode === AUTOPOST_MODES.FLIGHT_GROUPS) {
+    return buildFlightSections(sortedRuns, 3);
+  }
+
+  if (normalizedMode === AUTOPOST_MODES.CATEGORY_GROUPS) {
+    return buildCategorySections(sortedRuns, 3);
+  }
+
+  if (normalizedMode === AUTOPOST_MODES.FULL_BREAKDOWN) {
+    return [
+      buildSingleSection('overall', '🔥 Best Overall', sortedRuns.slice(0, 3)),
+      ...buildFlightSections(sortedRuns, 3),
+      ...buildCategorySections(sortedRuns, 3)
+    ];
+  }
+
+  return [buildSingleSection('overall', '🔥 Best Overall', sortedRuns.slice(0, normalizeAutopostCount(count)))];
 }
 
-function buildAutopostMixedHighlights(runs) {
-  const sortedRuns = Array.isArray(runs) ? runs.slice().sort(sortRunsByProfitPerMinuteDesc) : [];
+function parseAutopostListInput(value, {
+  fieldLabel,
+  validValues,
+  resolveValue,
+  strict = true
+}) {
+  const tokens = splitAutopostInput(value);
+  const values = [];
+  const invalid = [];
+  const seen = new Set();
 
+  for (const token of tokens) {
+    const resolvedValue = resolveValue(token);
+
+    if (!resolvedValue) {
+      invalid.push(token);
+      continue;
+    }
+
+    const uniqueKey = String(resolvedValue).toLowerCase();
+
+    if (!seen.has(uniqueKey)) {
+      seen.add(uniqueKey);
+      values.push(resolvedValue);
+    }
+  }
+
+  if (strict && invalid.length) {
+    throw new Error(
+      `Invalid ${fieldLabel}: ${invalid.join(', ')}. Valid options: ${validValues.join(', ')}.`
+    );
+  }
+
+  return { values };
+}
+
+function splitAutopostInput(value) {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => splitAutopostInput(entry));
+  }
+
+  return String(value || '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function buildSingleSection(key, title, runs) {
   return {
-    overall: sortedRuns[0] || null,
-    plushies: sortedRuns.find((run) => getTrackedRunCategory(run?.itemName) === 'plushies') || null,
-    flowers: sortedRuns.find((run) => getTrackedRunCategory(run?.itemName) === 'flowers') || null,
-    drugs: sortedRuns.find((run) => getTrackedRunCategory(run?.itemName) === 'drugs') || null,
-    short: sortedRuns.find((run) => getFlightBucketForRun(run)?.key === 'short') || null,
-    medium: sortedRuns.find((run) => getFlightBucketForRun(run)?.key === 'medium') || null,
-    long: sortedRuns.find((run) => getFlightBucketForRun(run)?.key === 'long') || null
+    key,
+    title,
+    runs
   };
+}
+
+function buildFlightSections(sortedRuns, limit) {
+  return FLIGHT_GROUPS.map((group) =>
+    buildSingleSection(
+      group.key,
+      group.title,
+      sortedRuns.filter((run) => getFlightGroupForRun(run)?.key === group.key).slice(0, limit)
+    )
+  );
+}
+
+function buildCategorySections(sortedRuns, limit) {
+  return CATEGORY_GROUPS.map((group) =>
+    buildSingleSection(
+      group.key,
+      group.title,
+      sortedRuns
+        .filter((run) => getTrackedRunCategory(run?.itemName) === group.key)
+        .slice(0, limit)
+    )
+  );
 }
 
 module.exports = {
   AUTOPOST_MODE_CHOICES,
   AUTOPOST_MODES,
+  CATEGORY_GROUPS,
   DEFAULT_AUTOPOST_COUNT,
-  FLIGHT_BUCKETS,
+  FLIGHT_GROUPS,
   MAX_AUTOPOST_COUNT,
   MIN_AUTOPOST_COUNT,
   buildAutopostDescription,
   buildAutopostEmptyDescription,
   buildAutopostEmptyTitle,
-  buildAutopostFlightBucketSections,
-  buildAutopostMixedHighlights,
+  buildAutopostSections,
   buildAutopostTitle,
   formatAutopostFilters,
   formatAutopostMode,
   formatAutopostModeSummary,
-  getFlightBucketForRun,
+  getFlightGroupForRun,
   normalizeAutopostCount,
+  normalizeAutopostFilters,
   normalizeAutopostMode,
-  normalizeAutopostFilters
+  parseAutopostCategoryInput,
+  parseAutopostCountryInput
 };

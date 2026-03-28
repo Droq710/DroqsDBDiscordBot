@@ -8,7 +8,9 @@ const {
   formatAutopostFilters,
   formatAutopostMode,
   formatAutopostModeSummary,
-  normalizeAutopostMode
+  normalizeAutopostMode,
+  parseAutopostCategoryInput,
+  parseAutopostCountryInput
 } = require('../../utils/autopost');
 
 function assertGuildAdmin(interaction) {
@@ -81,8 +83,12 @@ async function execute(interaction, context) {
     const channel = interaction.options.getChannel('channel', true);
     const count = interaction.options.getInteger('count') ?? DEFAULT_AUTOPOST_COUNT;
     const mode = normalizeAutopostMode(interaction.options.getString('mode'));
-    const category = interaction.options.getString('category');
-    const country = interaction.options.getString('country');
+    const categoryInput =
+      interaction.options.getString('categories') ?? interaction.options.getString('category');
+    const countryInput =
+      interaction.options.getString('countries') ?? interaction.options.getString('country');
+    const categories = parseAutopostCategoryInput(categoryInput).values;
+    const countries = parseAutopostCountryInput(countryInput).values;
 
     assertSendableChannel(interaction, channel);
 
@@ -91,15 +97,15 @@ async function execute(interaction, context) {
       channelId: channel.id,
       count,
       mode,
-      category,
-      country,
+      categories,
+      countries,
       updatedBy: interaction.user.id
     });
     context.logger.info('autopost.enabled', {
-      category: guildConfig.category,
+      categories: guildConfig.categories,
       channelId: guildConfig.channelId,
       count: guildConfig.count,
-      country: guildConfig.country,
+      countries: guildConfig.countries,
       guildId: interaction.guildId,
       mode: guildConfig.mode,
       userId: interaction.user.id

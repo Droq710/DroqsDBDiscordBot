@@ -37,9 +37,11 @@ class GuildConfigStore {
         autopost_enabled INTEGER NOT NULL DEFAULT 0,
         channel_id TEXT,
         count INTEGER NOT NULL DEFAULT 10,
-        preset_mode TEXT NOT NULL DEFAULT 'count',
+        preset_mode TEXT NOT NULL DEFAULT 'top_n',
         preset_country TEXT,
         preset_category TEXT,
+        preset_countries TEXT NOT NULL DEFAULT '[]',
+        preset_categories TEXT NOT NULL DEFAULT '[]',
         updated_at TEXT NOT NULL,
         updated_by TEXT
       );
@@ -84,19 +86,28 @@ class GuildConfigStore {
     guildId,
     channelId,
     count = DEFAULT_AUTOPOST_COUNT,
-    mode = 'count',
+    mode = 'top_n',
+    countries = [],
+    categories = [],
     country = null,
     category = null,
     updatedBy = null
   }) {
-    const filters = normalizeAutopostFilters({ country, category });
+    const filters = normalizeAutopostFilters({
+      countries,
+      categories,
+      country,
+      category
+    });
     const row = {
       guildId: String(guildId),
       channelId: String(channelId),
       count: normalizeAutopostCount(count),
       mode: normalizeAutopostMode(mode),
-      country: filters.country,
-      category: filters.category,
+      country: null,
+      category: null,
+      countries: JSON.stringify(filters.countries),
+      categories: JSON.stringify(filters.categories),
       updatedAt: new Date().toISOString(),
       updatedBy: updatedBy ? String(updatedBy) : null
     };
@@ -131,6 +142,8 @@ class GuildConfigStore {
           preset_mode,
           preset_country,
           preset_category,
+          preset_countries,
+          preset_categories,
           updated_at,
           updated_by
         FROM guild_autopost_configs
@@ -145,6 +158,8 @@ class GuildConfigStore {
           preset_mode,
           preset_country,
           preset_category,
+          preset_countries,
+          preset_categories,
           updated_at,
           updated_by
         FROM guild_autopost_configs
@@ -160,6 +175,8 @@ class GuildConfigStore {
           preset_mode,
           preset_country,
           preset_category,
+          preset_countries,
+          preset_categories,
           updated_at,
           updated_by
         ) VALUES (
@@ -170,6 +187,8 @@ class GuildConfigStore {
           @mode,
           @country,
           @category,
+          @countries,
+          @categories,
           @updatedAt,
           @updatedBy
         )
@@ -180,6 +199,8 @@ class GuildConfigStore {
           preset_mode = excluded.preset_mode,
           preset_country = excluded.preset_country,
           preset_category = excluded.preset_category,
+          preset_countries = excluded.preset_countries,
+          preset_categories = excluded.preset_categories,
           updated_at = excluded.updated_at,
           updated_by = excluded.updated_by
       `),
@@ -221,7 +242,19 @@ class GuildConfigStore {
 
     if (!columns.includes('preset_mode')) {
       this.db.exec(
-        "ALTER TABLE guild_autopost_configs ADD COLUMN preset_mode TEXT NOT NULL DEFAULT 'count'"
+        "ALTER TABLE guild_autopost_configs ADD COLUMN preset_mode TEXT NOT NULL DEFAULT 'top_n'"
+      );
+    }
+
+    if (!columns.includes('preset_countries')) {
+      this.db.exec(
+        "ALTER TABLE guild_autopost_configs ADD COLUMN preset_countries TEXT NOT NULL DEFAULT '[]'"
+      );
+    }
+
+    if (!columns.includes('preset_categories')) {
+      this.db.exec(
+        "ALTER TABLE guild_autopost_configs ADD COLUMN preset_categories TEXT NOT NULL DEFAULT '[]'"
       );
     }
   }
@@ -280,9 +313,11 @@ class GuildConfigStore {
           guildId: String(guildId),
           channelId: String(legacyConfig.channelId),
           count: DEFAULT_AUTOPOST_COUNT,
-          mode: 'count',
+          mode: 'top_n',
           country: null,
           category: null,
+          countries: '[]',
+          categories: '[]',
           updatedAt:
             typeof legacyConfig.updatedAt === 'string' && legacyConfig.updatedAt
               ? legacyConfig.updatedAt
@@ -301,17 +336,41 @@ class GuildConfigStore {
 }
 
 function mapGuildConfigRow(row) {
+  const countries = getStoredAutopostFilterArray(row.preset_countries, row.preset_country, 'country');
+  const categories = getStoredAutopostFilterArray(row.preset_categories, row.preset_category, 'category');
+
   return {
     guildId: row.guild_id,
     autopostEnabled: Boolean(row.autopost_enabled),
     channelId: row.channel_id || null,
     count: normalizeAutopostCount(row.count),
     mode: normalizeAutopostMode(row.preset_mode),
-    country: row.preset_country || null,
-    category: row.preset_category || null,
+    country: countries.length === 1 ? countries[0] : null,
+    category: categories.length === 1 ? categories[0] : null,
+    countries,
+    categories,
     updatedAt: row.updated_at || null,
     updatedBy: row.updated_by || null
   };
+}
+
+function getStoredAutopostFilterArray(serializedValue, legacyValue, filterKey) {
+  const collectionKey = filterKey === 'country' ? 'countries' : 'categories';
+  let parsedValues = [];
+
+  try {
+    const parsed = JSON.parse(String(serializedValue || '[]'));
+    parsedValues = Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    parsedValues = [];
+  }
+
+  const normalized = normalizeAutopostFilters({
+    [filterKey]: legacyValue,
+    [collectionKey]: parsedValues
+  });
+
+  return normalized[collectionKey];
 }
 
 module.exports = {
