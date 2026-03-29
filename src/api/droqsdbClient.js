@@ -599,7 +599,7 @@ class DroqsDbClient {
     const topRunsPayload = await this.getTopRuns();
     const filteredPublicRuns =
       topRunsPayload.runs !== null
-        ? filterRunsForSelections(topRunsPayload.runs, filters)
+        ? safeFilterRunsForSelections(topRunsPayload.runs, filters)
         : null;
     const hasExplicitFilters = filters.countries.length > 0 || filters.categories.length > 0;
     const publicRunsMayBeTruncated =
@@ -842,10 +842,51 @@ function buildCurrentRunsFromExportPayload(payload) {
   return runs;
 }
 
+function safeFilterRunsForSelections(runs, filters = {}) {
+  const selectionFilter = resolveRunSelectionFilter();
+
+  if (!selectionFilter) {
+    return Array.isArray(runs) ? runs.slice() : [];
+  }
+
+  return selectionFilter(runs, filters);
+}
+
+function resolveRunSelectionFilter() {
+  if (typeof filterRunsForSelections === 'function') {
+    return filterRunsForSelections;
+  }
+
+  if (typeof filterRunsForSelection === 'function') {
+    return filterRunsForSelection;
+  }
+
+  return null;
+}
+
+function filterRunsForSelections(runs, filters = {}) {
+  return applyRunSelectionFilter(runs, filters);
+}
+
+function filterRunsForSelection(runs, filters = {}) {
+  return filterRunsForSelections(runs, filters);
+}
+
 function filterCurrentRunsForSelections(runs, {
   countries = [],
   categories = []
 } = {}) {
+  return applyRunSelectionFilter(runs, {
+    countries,
+    categories
+  });
+}
+
+function applyRunSelectionFilter(runs, {
+  countries = [],
+  categories = []
+} = {}) {
+  const normalizedRuns = Array.isArray(runs) ? runs : [];
   const countrySet = countries.length
     ? new Set(countries.map((country) => normalizeText(country)))
     : null;
@@ -853,7 +894,7 @@ function filterCurrentRunsForSelections(runs, {
     ? new Set(categories.map((category) => normalizeText(category)))
     : null;
 
-  return runs.filter((run) => {
+  return normalizedRuns.filter((run) => {
     if (countrySet && !countrySet.has(normalizeText(run?.country))) {
       return false;
     }

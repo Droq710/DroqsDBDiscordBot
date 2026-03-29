@@ -405,24 +405,33 @@ class AutopostService {
       ...buildRunLogContext(runContext),
       apiPath,
       reason,
-      targetChannelId: channel.id
+      targetChannelId: channel?.id || null
     };
+
+    this.logger.warn('autopost.fallback_started', logContext);
 
     try {
       await channel.send({
         content: AUTOPOST_FALLBACK_MESSAGE
       });
 
-      this.logger.warn('autopost.fallback_posted', logContext);
+      this.logger.warn('autopost.fallback_completed', logContext);
     } catch (error) {
-      this.logger.error('autopost.fallback_post_failed', error, logContext);
+      this.logger.error('autopost.fallback_failed', error, logContext);
 
       if ([10003, 50001, 50013].includes(Number(error.code))) {
-        await this.disableInvalidConfig(
-          guildConfig,
-          `fallback post failed with Discord error code ${error.code}`,
-          runContext
-        );
+        try {
+          await this.disableInvalidConfig(
+            guildConfig,
+            `fallback post failed with Discord error code ${error.code}`,
+            runContext
+          );
+        } catch (disableError) {
+          this.logger.error('autopost.fallback_failed', disableError, {
+            ...logContext,
+            failureStage: 'disable_invalid_config'
+          });
+        }
       }
     }
   }
