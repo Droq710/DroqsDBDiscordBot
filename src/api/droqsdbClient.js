@@ -8,6 +8,8 @@ const {
 
 const COMPANION_TRAVEL_PLANNER_QUERY_PATH = '/api/companion/v1/travel-planner/query';
 const DEFAULT_DROQSDB_API_TIMEOUT_MS = 30_000;
+const DEFAULT_TRAVEL_PLANNER_RESULT_LIMIT = 10;
+const MAX_TRAVEL_PLANNER_RESULT_LIMIT = 100;
 const DEFAULT_COMPANION_TRAVEL_PLANNER_SETTINGS = Object.freeze({
   sellWhere: 'market',
   applyTax: true,
@@ -342,12 +344,15 @@ class DroqsDbClient {
       body: JSON.stringify(requestBody),
       urlOverride: this.buildWebUrl(COMPANION_TRAVEL_PLANNER_QUERY_PATH)
     });
+    const normalizedBestRun = normalizePublicRun(payload?.bestRun);
+    const bestRun =
+      normalizedBestRun && isViablePublicRun(normalizedBestRun) ? normalizedBestRun : null;
 
     return {
       ...payload,
       apiPath: COMPANION_TRAVEL_PLANNER_QUERY_PATH,
-      bestRun: payload?.bestRun || null,
-      runs: Array.isArray(payload?.runs) ? payload.runs : [],
+      bestRun,
+      runs: normalizePublicRunArray(payload?.runs) || [],
       emptyReason: String(payload?.emptyReason || '').trim() || null,
       emptyStateGuidance: normalizeEmptyStateGuidance(payload?.emptyStateGuidance)
     };
@@ -527,36 +532,106 @@ class DroqsDbClient {
     return validCategory;
   }
 
-  async getCurrentRunsByCountry(countryInput, count = 10) {
-    const payload = await this.getCountry(countryInput);
-    const runs = buildCurrentRunsFromCountryPayload(payload).slice(0, normalizeSliceCount(count));
+  async getCurrentRunsForSellTarget(targetInput, count = 10) {
+    const sellTarget = normalizeSellTarget(targetInput);
 
-    return buildRunFilterResult({
-      generatedAt: payload.generatedAt,
-      apiPath: payload.apiPath,
-      countries: [payload.country.country],
-      categories: [],
-      emptyStateGuidance: payload.emptyStateGuidance || null,
-      runs
+    if (!sellTarget) {
+      throw new DroqsDbLookupError(`Sell target "${targetInput}" is not supported.`, {
+        suggestions: ['market', 'bazaar', 'torn']
+      });
+    }
+
+    if (sellTarget === 'market') {
+      const payload = await this.getTopRuns();
+
+      return {
+        generatedAt: payload.generatedAt,
+        apiPath: payload.apiPath,
+        sellTarget,
+        emptyStateGuidance: payload.emptyStateGuidance || null,
+        runs: getTopRunsForDisplay(payload).slice(0, normalizeSliceCount(count))
+      };
+    }
+
+    try {
+      const settings = await this.getTravelPlannerDefaultSettings();
+      const payload = await this.queryTravelPlanner({
+        settings: {
+          ...settings,
+          sellWhere: sellTarget
+        },
+        limit: normalizeTravelPlannerLimit(count, DEFAULT_TRAVEL_PLANNER_RESULT_LIMIT)
+      });
+
+      return {
+        generatedAt: payload.generatedAt,
+        apiPath: payload.apiPath,
+        sellTarget,
+        emptyStateGuidance: payload.emptyStateGuidance || null,
+        runs: payload.runs.slice(0, normalizeSliceCount(count))
+      };
+    } catch (error) {
+      this.logger.warn('droqsdb.travel_planner.sell_target_fallback', error, {
+        sellTarget
+      });
+
+      const payload = await this.getTopRuns();
+
+      return {
+        generatedAt: payload.generatedAt,
+        apiPath: payload.apiPath,
+        sellTarget,
+        emptyStateGuidance: payload.emptyStateGuidance || null,
+        runs: getTopRunsForDisplay(payload)
+          .filter((run) => hasSellTargetPrice(run, sellTarget))
+          .slice(0, normalizeSliceCount(count))
+      };
+    }
+  }
+
+  async getCurrentRunsByCountry(countryInput, count = 10) {
+    const countryName = await this.resolveCountryName(countryInput);
+
+    return this.getCurrentRunsForFilters({
+      count,
+      countries: [countryName]
     });
   }
 
   async getCurrentRunsByItem(itemInput, count = 3) {
     const payload = await this.getItem(itemInput);
-    const currentRuns = (payload.item.countries || [])
-      .filter(isCurrentProfitableRun)
-      .sort(sortByProfitPerMinuteDesc)
-      .slice(0, normalizeSliceCount(count));
+    let generatedAt = payload.generatedAt;
+    let apiPath = payload.apiPath;
+    let emptyStateGuidance = payload.emptyStateGuidance || null;
+    let currentRuns;
+
+    try {
+      const plannerPayload = await this.queryTravelPlanner({
+        itemNames: [payload.resolvedItemName],
+        limit: normalizeTravelPlannerLimit(count, 3)
+      });
+
+      generatedAt = plannerPayload.generatedAt || generatedAt;
+      apiPath = plannerPayload.apiPath || apiPath;
+      emptyStateGuidance = plannerPayload.emptyStateGuidance || emptyStateGuidance;
+      currentRuns = plannerPayload.runs.slice(0, normalizeSliceCount(count));
+    } catch (error) {
+      this.logger.warn('droqsdb.travel_planner.item_fallback', error, {
+        itemName: payload.resolvedItemName
+      });
+
+      currentRuns = buildLegacyCurrentRunsFromItemPayload(payload).slice(0, normalizeSliceCount(count));
+    }
 
     const restockableRuns = (payload.item.countries || [])
       .filter((country) => Number(country.stock) <= 0 && Number.isFinite(Number(country.estimatedRestockMinutes)))
       .sort((left, right) => Number(left.estimatedRestockMinutes || 0) - Number(right.estimatedRestockMinutes || 0));
 
     return {
-      generatedAt: payload.generatedAt,
-      apiPath: payload.apiPath,
+      generatedAt,
+      apiPath,
       item: payload.item,
-      emptyStateGuidance: payload.emptyStateGuidance || null,
+      emptyStateGuidance,
       currentRuns,
       restockableRuns
     };
@@ -569,18 +644,42 @@ class DroqsDbClient {
     country = null,
     category = null
   } = {}) {
-    const requestedCount = Number.parseInt(count, 10) || 10;
-    const payload = await this.getCurrentRunUniverseForFilters({
+    const requestedCount = normalizeTravelPlannerLimit(count, DEFAULT_TRAVEL_PLANNER_RESULT_LIMIT);
+    const filters = normalizeRunFilterSelections({
       countries,
       categories,
       country,
       category
     });
 
-    return {
-      ...payload,
-      runs: payload.runs.slice(0, requestedCount)
-    };
+    try {
+      const payload = await this.queryTravelPlanner({
+        countries: filters.countries,
+        categories: filters.categories,
+        limit: requestedCount
+      });
+
+      return buildRunFilterResult({
+        generatedAt: payload.generatedAt,
+        apiPath: payload.apiPath,
+        countries: filters.countries,
+        categories: filters.categories,
+        emptyStateGuidance: payload.emptyStateGuidance || null,
+        runs: payload.runs
+      });
+    } catch (error) {
+      this.logger.warn('droqsdb.travel_planner.filters_fallback', error, {
+        countries: filters.countries,
+        categories: filters.categories
+      });
+
+      const payload = await this.getLegacyCurrentRunUniverseForFilters(filters);
+
+      return {
+        ...payload,
+        runs: payload.runs.slice(0, requestedCount)
+      };
+    }
   }
 
   async getCurrentRunUniverseForFilters({
@@ -594,6 +693,62 @@ class DroqsDbClient {
       categories,
       country,
       category
+    });
+    try {
+      const payload = await this.queryTravelPlanner({
+        countries: filters.countries,
+        categories: filters.categories,
+        limit: MAX_TRAVEL_PLANNER_RESULT_LIMIT
+      });
+
+      return buildRunFilterResult({
+        generatedAt: payload.generatedAt,
+        apiPath: payload.apiPath,
+        countries: filters.countries,
+        categories: filters.categories,
+        emptyStateGuidance: payload.emptyStateGuidance || null,
+        runs: payload.runs
+      });
+    } catch (error) {
+      this.logger.warn('droqsdb.travel_planner.universe_fallback', error, {
+        countries: filters.countries,
+        categories: filters.categories
+      });
+
+      return this.getLegacyCurrentRunUniverseForFilters(filters);
+    }
+  }
+
+  async getCurrentRunsByCategory(categoryInput, count = 10) {
+    const validCategory = this.resolveCategory(categoryInput);
+
+    return this.getCurrentRunsForFilters({
+      count,
+      categories: [validCategory]
+    });
+  }
+
+  async getLegacyCurrentRunsByCountry(countryInput, count = 10) {
+    const payload = await this.getCountry(countryInput);
+    const runs = buildCurrentRunsFromCountryPayload(payload).slice(0, normalizeSliceCount(count));
+
+    return buildRunFilterResult({
+      generatedAt: payload.generatedAt,
+      apiPath: payload.apiPath,
+      countries: [payload.country.country],
+      categories: [],
+      emptyStateGuidance: payload.emptyStateGuidance || null,
+      runs
+    });
+  }
+
+  async getLegacyCurrentRunUniverseForFilters({
+    countries = [],
+    categories = []
+  } = {}) {
+    const filters = normalizeRunFilterSelections({
+      countries,
+      categories
     });
 
     const topRunsPayload = await this.getTopRuns();
@@ -621,11 +776,11 @@ class DroqsDbClient {
     }
 
     if (filters.countries.length === 1 && !filters.categories.length) {
-      return this.getCurrentRunsByCountry(filters.countries[0], null);
+      return this.getLegacyCurrentRunsByCountry(filters.countries[0], null);
     }
 
     if (!filters.countries.length && filters.categories.length === 1) {
-      return this.getCurrentRunsByCategory(filters.categories[0], null);
+      return this.getLegacyCurrentRunsByCategory(filters.categories[0], null);
     }
 
     if (filters.countries.length === 1) {
@@ -651,7 +806,7 @@ class DroqsDbClient {
     });
   }
 
-  async getCurrentRunsByCategory(categoryInput, count = 10) {
+  async getLegacyCurrentRunsByCategory(categoryInput, count = 10) {
     const validCategory = this.resolveCategory(categoryInput);
     const payload = await this.getExport();
     const runs = filterCurrentRunsForSelections(buildCurrentRunsFromExportPayload(payload), {
@@ -725,6 +880,16 @@ function resolveRequestTimeoutMs(requestTimeoutMs) {
 function normalizeSliceCount(count) {
   const parsed = Number.parseInt(count, 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : Number.MAX_SAFE_INTEGER;
+}
+
+function normalizeTravelPlannerLimit(limit, fallback = DEFAULT_TRAVEL_PLANNER_RESULT_LIMIT) {
+  const parsed = Number.parseInt(limit, 10);
+
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.min(MAX_TRAVEL_PLANNER_RESULT_LIMIT, parsed);
 }
 
 function toSelectionArray(value) {
@@ -919,6 +1084,11 @@ function normalizeRoundTripHours(value) {
   return Math.max(0.5, Math.round(numeric * 2) / 2);
 }
 
+function normalizeSellTarget(value) {
+  const normalized = normalizeText(value);
+  return ['market', 'bazaar', 'torn'].includes(normalized) ? normalized : null;
+}
+
 function normalizeTravelPlannerSettings(settings) {
   const source = settings && typeof settings === 'object' ? settings : {};
   const normalizedCapacity = Number.parseInt(source.capacity, 10);
@@ -1027,7 +1197,7 @@ function normalizePublicRun(run) {
     ...run,
     itemName,
     country,
-    category: String(run.category || '').trim() || null,
+    category: String(run.category || run.shopCategory || '').trim() || null,
     shopCategory: String(run.shopCategory || '').trim() || null,
     trackedCategory,
     availabilityState,
@@ -1036,6 +1206,9 @@ function normalizePublicRun(run) {
     departInMinutes: toMetric(run.departInMinutes),
     availabilityWindowMinutes: toMetric(run.availabilityWindowMinutes),
     restockEtaMinutes: toMetric(run.restockEtaMinutes),
+    stockUpdatedAt: run.stockUpdatedAt || run.updatedAt || null,
+    pricingSource: String(run.pricingSource || run.source || '').trim() || null,
+    pricingUpdatedAt: run.pricingUpdatedAt || run.updatedAt || null,
     timingTight: run.timingTight === true
   };
 }
@@ -1059,6 +1232,31 @@ function isViablePublicRun(run) {
 function toMetric(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
+}
+
+function getTopRunsForDisplay(payload) {
+  if (Array.isArray(payload?.runs)) {
+    return payload.runs;
+  }
+
+  return Array.isArray(payload?.items) ? payload.items : [];
+}
+
+function hasSellTargetPrice(run, sellTarget) {
+  switch (sellTarget) {
+    case 'market':
+      return Number(run?.profitPerMinute) > 0;
+    case 'bazaar':
+      return Number(run?.bazaarPrice) > 0;
+    case 'torn':
+      return Number(run?.tornCityShops) > 0;
+    default:
+      return false;
+  }
+}
+
+function buildLegacyCurrentRunsFromItemPayload(payload) {
+  return (payload.item.countries || []).filter(isCurrentProfitableRun).sort(sortByProfitPerMinuteDesc);
 }
 
 function normalizeFetchError(error) {
