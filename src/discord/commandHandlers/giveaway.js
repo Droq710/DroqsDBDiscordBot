@@ -5,6 +5,12 @@ const {
   formatWinnerMentions
 } = require('../../utils/giveawayFormatters');
 const {
+  DEFAULT_GIVEAWAY_WINNER_COOLDOWN_MS,
+  GIVEAWAY_END_MODE_ENTRIES,
+  GIVEAWAY_END_MODE_TIME,
+  formatDurationWords,
+  normalizeGiveawayEndMode,
+  normalizeGiveawayMaxEntries,
   normalizeGiveawayMessageId,
   parseGiveawayDuration
 } = require('../../utils/giveaway');
@@ -53,11 +59,29 @@ async function execute(interaction, context) {
     const channel = interaction.channel;
     const item = interaction.options.getString('item', true).trim();
     const winners = interaction.options.getInteger('winners', true);
-    const durationInput = interaction.options.getString('duration', true);
-    const duration = parseGiveawayDuration(durationInput);
+    const durationInput = interaction.options.getString('duration');
+    const maxEntries = normalizeGiveawayMaxEntries(interaction.options.getInteger('max_entries'));
+    const endMode = resolveRequestedGiveawayEndMode({
+      requestedEndMode: interaction.options.getString('end_mode'),
+      durationInput,
+      maxEntries
+    });
+    const duration =
+      endMode === GIVEAWAY_END_MODE_TIME
+        ? parseRequiredGiveawayDuration(durationInput)
+        : null;
+    const winnerCooldownEnabled = interaction.options.getBoolean('winner_cooldown') === true;
 
     if (!item) {
       throw new Error('Prize text cannot be empty.');
+    }
+
+    if (endMode === GIVEAWAY_END_MODE_ENTRIES && !Number.isFinite(maxEntries)) {
+      throw new Error('Entry-target giveaways need a max entry count.');
+    }
+
+    if (endMode === GIVEAWAY_END_MODE_ENTRIES && maxEntries < winners) {
+      throw new Error('Entry target must be at least as large as the winner count.');
     }
 
     assertGiveawayChannel(interaction, channel);
@@ -67,16 +91,23 @@ async function execute(interaction, context) {
       hostUser: interaction.user,
       prizeText: item,
       winnerCount: winners,
-      durationMs: duration.durationMs
+      durationMs: duration?.durationMs || 0,
+      endMode,
+      maxEntries,
+      winnerCooldownEnabled
     });
 
     context.logger.info('giveaway.started', {
       channelId: giveaway.channelId,
       durationMs: giveaway.durationMs,
+      endMode: giveaway.endMode,
       endAt: giveaway.endAt,
       guildId: giveaway.guildId,
       hostId: giveaway.hostId,
+      maxEntries: giveaway.maxEntries,
       messageId: giveaway.messageId,
+      winnerCooldownEnabled: giveaway.winnerCooldownEnabled,
+      winnerCooldownMs: giveaway.winnerCooldownMs,
       winnerCount: giveaway.winnerCount
     });
 
@@ -84,14 +115,11 @@ async function execute(interaction, context) {
       embeds: [
         buildInfoEmbed(
           'Boarding Confirmed',
-          [
-            `Posted in ${channel}.`,
-            `Prize: ${giveaway.prizeText}`,
-            `Winners: ${giveaway.winnerCount}`,
-            `Ends: <t:${Math.floor(Date.parse(giveaway.endAt) / 1000)}:F>`,
-            `Time left: <t:${Math.floor(Date.parse(giveaway.endAt) / 1000)}:R>`,
-            `Message: ${message.url}`
-          ].join('\n')
+          buildGiveawayStartSummary({
+            channel,
+            giveaway,
+            message
+          })
         )
       ]
     });
@@ -242,6 +270,64 @@ function buildGiveawayAdminResultEmbed(title, giveaway, result) {
       `Announcement sent: ${result.announcementSent ? 'Yes' : 'No'}`
     ].join('\n')
   );
+}
+
+function resolveRequestedGiveawayEndMode({
+  requestedEndMode,
+  durationInput,
+  maxEntries
+}) {
+  if (requestedEndMode) {
+    return normalizeGiveawayEndMode(requestedEndMode);
+  }
+
+  const hasDuration = Boolean(String(durationInput || '').trim());
+  const hasMaxEntries = Number.isFinite(maxEntries);
+
+  if (hasDuration && hasMaxEntries) {
+    throw new Error(
+      'Choose either a duration or a max entry count, or set the end mode explicitly.'
+    );
+  }
+
+  return hasMaxEntries ? GIVEAWAY_END_MODE_ENTRIES : GIVEAWAY_END_MODE_TIME;
+}
+
+function parseRequiredGiveawayDuration(value) {
+  const normalized = String(value || '').trim();
+
+  if (!normalized) {
+    throw new Error('Timed giveaways need a duration, for example `15m` or `2h`.');
+  }
+
+  return parseGiveawayDuration(normalized);
+}
+
+function buildGiveawayStartSummary({
+  channel,
+  giveaway,
+  message
+}) {
+  const lines = [
+    `Posted in ${channel}.`,
+    `Prize: ${giveaway.prizeText}`,
+    `Winners: ${giveaway.winnerCount}`,
+    giveaway.endMode === GIVEAWAY_END_MODE_ENTRIES
+      ? `Mode: Entry target (${giveaway.maxEntries} entries)`
+      : 'Mode: Timed',
+    giveaway.winnerCooldownEnabled
+      ? `Winner cooldown: On (${formatDurationWords(giveaway.winnerCooldownMs || DEFAULT_GIVEAWAY_WINNER_COOLDOWN_MS)})`
+      : 'Winner cooldown: Off'
+  ];
+
+  if (giveaway.endMode === GIVEAWAY_END_MODE_TIME && giveaway.endAt) {
+    lines.push(`Ends: <t:${Math.floor(Date.parse(giveaway.endAt) / 1000)}:F>`);
+    lines.push(`Time left: <t:${Math.floor(Date.parse(giveaway.endAt) / 1000)}:R>`);
+  }
+
+  lines.push(`Message: ${message.url}`);
+
+  return lines.join('\n');
 }
 
 function formatPermissionName(permission) {

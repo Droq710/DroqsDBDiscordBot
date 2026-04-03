@@ -1,5 +1,14 @@
 const { EmbedBuilder } = require('discord.js');
-const { GIVEAWAY_EMOJI } = require('./giveaway');
+const {
+  DEFAULT_GIVEAWAY_WINNER_COOLDOWN_MS,
+  GIVEAWAY_EMOJI,
+  GIVEAWAY_END_MODE_ENTRIES,
+  GIVEAWAY_END_MODE_TIME,
+  formatDurationWords,
+  normalizeGiveawayEndMode,
+  normalizeGiveawayWinnerCooldownEnabled,
+  normalizeGiveawayWinnerCooldownMs
+} = require('./giveaway');
 
 const COLORS = Object.freeze({
   info: 0x5865f2,
@@ -18,13 +27,18 @@ function buildGiveawayEmbed({
   hostId,
   endAt,
   status = 'active',
+  endMode = GIVEAWAY_END_MODE_TIME,
+  maxEntries = null,
   winnerIds = [],
   entrantCount = null,
   eligibleEntrantCount = null,
   endedAt = null,
-  rerolledAt = null
+  rerolledAt = null,
+  winnerCooldownEnabled = false,
+  winnerCooldownMs = DEFAULT_GIVEAWAY_WINNER_COOLDOWN_MS
 }) {
   const isEnded = status === 'ended';
+  const normalizedEndMode = normalizeGiveawayEndMode(endMode);
   const resolvedWinnerIds = normalizeIdList(winnerIds);
   const resolvedEntrantCount = normalizeCount(entrantCount);
   const resolvedEligibleEntrantCount =
@@ -34,7 +48,9 @@ function buildGiveawayEmbed({
     ? resolvedWinnerIds.length
       ? `${resolvedWinnerIds.length === 1 ? 'Passenger selected' : 'Passengers selected'}: ${formatWinnerMentions(resolvedWinnerIds)}`
       : 'Flight closed. No eligible passengers were available at departure.'
-    : `React with ${GIVEAWAY_EMOJI} on this message to enter.`;
+    : normalizedEndMode === GIVEAWAY_END_MODE_ENTRIES && normalizeCount(maxEntries) !== null
+      ? `React with ${GIVEAWAY_EMOJI} on this message to enter. This flight closes when ${formatCount(maxEntries)} entries are reached.`
+      : `React with ${GIVEAWAY_EMOJI} on this message to enter.`;
   const embed = new EmbedBuilder()
     .setTitle(title)
     .setDescription(description)
@@ -48,13 +64,11 @@ function buildGiveawayEmbed({
       inline: false
     },
     {
-      name: isEnded ? 'Closed' : 'Ends In',
-      value: isEnded ? toDiscordTimestamp(resolvedEndedAt, 'R') : toDiscordTimestamp(endAt, 'R'),
-      inline: true
-    },
-    {
-      name: isEnded ? 'Closed At' : 'End Time',
-      value: toDiscordTimestamp(resolvedEndedAt, 'F'),
+      name: 'Mode',
+      value:
+        normalizedEndMode === GIVEAWAY_END_MODE_ENTRIES
+          ? 'Entry target'
+          : 'Timed',
       inline: true
     },
     {
@@ -66,8 +80,45 @@ function buildGiveawayEmbed({
       name: 'Host',
       value: `<@${hostId}>`,
       inline: true
+    },
+    {
+      name: 'Winner Cooldown',
+      value: formatWinnerCooldownSetting({
+        enabled: winnerCooldownEnabled,
+        durationMs: winnerCooldownMs
+      }),
+      inline: true
     }
   );
+
+  if (normalizedEndMode === GIVEAWAY_END_MODE_ENTRIES && normalizeCount(maxEntries) !== null) {
+    embed.addFields({
+      name: 'Entry Goal',
+      value: `${formatCount(maxEntries)} entries`,
+      inline: true
+    });
+  }
+
+  if (normalizedEndMode === GIVEAWAY_END_MODE_TIME) {
+    embed.addFields(
+      {
+        name: isEnded ? 'Closed' : 'Ends In',
+        value: isEnded ? toDiscordTimestamp(resolvedEndedAt, 'R') : toDiscordTimestamp(endAt, 'R'),
+        inline: true
+      },
+      {
+        name: isEnded ? 'Closed At' : 'End Time',
+        value: toDiscordTimestamp(resolvedEndedAt, 'F'),
+        inline: true
+      }
+    );
+  } else if (isEnded) {
+    embed.addFields({
+      name: 'Closed At',
+      value: toDiscordTimestamp(resolvedEndedAt, 'F'),
+      inline: true
+    });
+  }
 
   if (!isEnded) {
     embed.addFields({
@@ -208,6 +259,28 @@ function buildExpiredGiveawayNoticeContent({
   ].join('\n');
 }
 
+function buildGiveawayEntryCooldownNoticeContent({
+  prizeText,
+  guildName = null,
+  cooldownLabel,
+  compact = false
+}) {
+  const safePrizeText = truncateText(sanitizeMentions(prizeText), 120);
+  const locationLine = guildName
+    ? `That giveaway in **${sanitizeMentions(guildName)}** has a recent-winner cooldown.`
+    : 'That giveaway has a recent-winner cooldown.';
+
+  if (compact) {
+    return `${locationLine} I removed your reaction. You can try again in about **${cooldownLabel}**. Prize: **${safePrizeText}**`;
+  }
+
+  return [
+    locationLine,
+    `Prize: **${safePrizeText}**`,
+    `I removed your reaction this time. You can enter again in about **${cooldownLabel}**.`
+  ].join('\n');
+}
+
 function formatWinnerMentions(winnerIds) {
   const resolvedWinnerIds = normalizeIdList(winnerIds);
   return resolvedWinnerIds.length
@@ -234,20 +307,37 @@ function formatWinnerAnnouncementTargets(winnerIds, winnerProfiles = []) {
 }
 
 function formatGiveawayStatusLine(giveaway) {
+  const normalizedEndMode = normalizeGiveawayEndMode(giveaway?.endMode);
   const isClosingNow =
     giveaway.status === 'ending' || isPastTimestamp(giveaway.endAt);
   const scheduleLabel = isClosingNow
     ? 'Closing now'
-    : `Ends ${toDiscordTimestamp(giveaway.endAt, 'R')} (${toDiscordTimestamp(giveaway.endAt, 'F')})`;
+    : normalizedEndMode === GIVEAWAY_END_MODE_ENTRIES && normalizeCount(giveaway.maxEntries) !== null
+      ? `Closes when ${formatCount(giveaway.maxEntries)} entries are reached`
+      : `Ends ${toDiscordTimestamp(giveaway.endAt, 'R')} (${toDiscordTimestamp(giveaway.endAt, 'F')})`;
 
   return [
     `**${truncateText(sanitizeMentions(giveaway.prizeText), 80)}**`,
     joinCompactParts([
       `<#${giveaway.channelId}>`,
-      `${formatCount(giveaway.winnerCount)} winner(s)`
+      `${formatCount(giveaway.winnerCount)} winner(s)`,
+      normalizedEndMode === GIVEAWAY_END_MODE_ENTRIES && normalizeCount(giveaway.maxEntries) !== null
+        ? `${formatCount(giveaway.maxEntries)} entry goal`
+        : 'Timed'
     ]),
     scheduleLabel
   ].join('\n');
+}
+
+function formatWinnerCooldownSetting({
+  enabled,
+  durationMs
+}) {
+  if (!normalizeGiveawayWinnerCooldownEnabled(enabled)) {
+    return 'Off';
+  }
+
+  return `On (${formatDurationWords(normalizeGiveawayWinnerCooldownMs(durationMs))})`;
 }
 
 function formatCount(value) {
@@ -318,6 +408,7 @@ function isPastTimestamp(value) {
 }
 
 module.exports = {
+  buildGiveawayEntryCooldownNoticeContent,
   buildExpiredGiveawayNoticeContent,
   buildGiveawayAnnouncementContent,
   buildGiveawayEmbed,

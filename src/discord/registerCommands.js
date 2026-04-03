@@ -215,10 +215,30 @@ function buildCommands() {
           )
           .addStringOption((option) =>
             option
+              .setName('end_mode')
+              .setDescription('Defaults to timed unless you provide only a max entry count.')
+              .addChoices(
+                { name: 'Timed', value: 'time' },
+                { name: 'Entry Target', value: 'entries' }
+              )
+          )
+          .addStringOption((option) =>
+            option
               .setName('duration')
-              .setDescription('Examples: 15m, 2h, 1h15m, 1d6h, 2d3h30m.')
-              .setRequired(true)
+              .setDescription('Timed mode only. Examples: 15m, 2h, 1h15m, 1d6h.')
               .setMaxLength(20)
+          )
+          .addIntegerOption((option) =>
+            option
+              .setName('max_entries')
+              .setDescription('Entry-target mode only. Ends when this many entries are reached.')
+              .setMinValue(1)
+              .setMaxValue(500)
+          )
+          .addBooleanOption((option) =>
+            option
+              .setName('winner_cooldown')
+              .setDescription('When on, recent winners must wait 3 minutes before entering again.')
           )
       )
       .addSubcommand((subcommand) =>

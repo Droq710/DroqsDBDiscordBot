@@ -1,15 +1,24 @@
 const {
+  buildGiveawayEntryCooldownNoticeContent,
   buildExpiredGiveawayNoticeContent,
   buildGiveawayAnnouncementContent,
   buildGiveawayEmbed,
   extractTornIdFromText
 } = require('../utils/giveawayFormatters');
 const {
+  DEFAULT_GIVEAWAY_WINNER_COOLDOWN_MS,
   GIVEAWAY_EMOJI,
+  GIVEAWAY_END_MODE_ENTRIES,
+  GIVEAWAY_END_MODE_TIME,
   chooseRandomEntries,
+  formatDurationWords,
   isGiveawayExpired,
   normalizeEmojiName,
-  normalizeGiveawayMessageId
+  normalizeGiveawayEndMode,
+  normalizeGiveawayMaxEntries,
+  normalizeGiveawayMessageId,
+  normalizeGiveawayWinnerCooldownEnabled,
+  normalizeGiveawayWinnerCooldownMs
 } = require('../utils/giveaway');
 
 const EXPIRED_REACTION_NOTICE_COOLDOWN_MS = 10 * 60 * 1000;
@@ -38,6 +47,7 @@ class GiveawayService {
     this.logger = logger;
     this.timers = new Map();
     this.inFlightMessageIds = new Set();
+    this.entryCloseSnapshots = new Map();
     this.reactionNoticeCooldowns = new Map();
     this.recentGiveawayAnnouncements = new Map();
     this.started = false;
@@ -56,6 +66,16 @@ class GiveawayService {
       this.scheduleGiveaway(giveaway);
     }
 
+    await Promise.allSettled(
+      pendingGiveaways
+        .filter(
+          (giveaway) =>
+            giveaway.status === 'active' &&
+            normalizeGiveawayEndMode(giveaway.endMode) === GIVEAWAY_END_MODE_ENTRIES
+        )
+        .map((giveaway) => this.recoverEntryModeGiveaway(giveaway))
+    );
+
     this.started = true;
     this.logger.info('giveaway.scheduler_started', {
       pendingGiveawayCount: pendingGiveaways.length
@@ -69,6 +89,7 @@ class GiveawayService {
 
     this.timers.clear();
     this.inFlightMessageIds.clear();
+    this.entryCloseSnapshots.clear();
     this.reactionNoticeCooldowns.clear();
     this.recentGiveawayAnnouncements.clear();
     this.giveawayStore.close();
@@ -98,9 +119,26 @@ class GiveawayService {
     hostUser,
     prizeText,
     winnerCount,
-    durationMs
+    durationMs = 0,
+    endMode = GIVEAWAY_END_MODE_TIME,
+    maxEntries = null,
+    winnerCooldownEnabled = false,
+    winnerCooldownMs = DEFAULT_GIVEAWAY_WINNER_COOLDOWN_MS
   }) {
-    const endAt = new Date(Date.now() + durationMs).toISOString();
+    const normalizedEndMode = normalizeGiveawayEndMode(endMode);
+    const normalizedMaxEntries =
+      normalizedEndMode === GIVEAWAY_END_MODE_ENTRIES
+        ? normalizeGiveawayMaxEntries(maxEntries)
+        : null;
+    const normalizedWinnerCooldownEnabled =
+      normalizeGiveawayWinnerCooldownEnabled(winnerCooldownEnabled);
+    const normalizedWinnerCooldownMs = normalizeGiveawayWinnerCooldownMs(
+      winnerCooldownMs
+    );
+    const endAt =
+      normalizedEndMode === GIVEAWAY_END_MODE_TIME
+        ? new Date(Date.now() + durationMs).toISOString()
+        : null;
     const giveawaysRole = channel.guild?.roles?.cache?.find(
       (role) => role.name === GIVEAWAYS_ROLE_NAME
     ) || null;
@@ -116,7 +154,11 @@ class GiveawayService {
             winnerCount,
             hostId: hostUser.id,
             endAt,
-            status: 'active'
+            status: 'active',
+            endMode: normalizedEndMode,
+            maxEntries: normalizedMaxEntries,
+            winnerCooldownEnabled: normalizedWinnerCooldownEnabled,
+            winnerCooldownMs: normalizedWinnerCooldownMs
           })
         ],
         allowedMentions: giveawaysRole
@@ -135,11 +177,27 @@ class GiveawayService {
         prizeText,
         winnerCount,
         durationMs,
-        endAt
+        endAt,
+        endMode: normalizedEndMode,
+        maxEntries: normalizedMaxEntries,
+        winnerCooldownEnabled: normalizedWinnerCooldownEnabled,
+        winnerCooldownMs: normalizedWinnerCooldownMs
       });
 
       await message.react(GIVEAWAY_EMOJI);
       this.scheduleGiveaway(createdGiveaway);
+      this.logger.info('giveaway.created', {
+        channelId: createdGiveaway.channelId,
+        endMode: createdGiveaway.endMode,
+        endAt: createdGiveaway.endAt,
+        guildId: createdGiveaway.guildId,
+        hostId: createdGiveaway.hostId,
+        maxEntries: createdGiveaway.maxEntries,
+        messageId: createdGiveaway.messageId,
+        winnerCooldownEnabled: createdGiveaway.winnerCooldownEnabled,
+        winnerCooldownMs: createdGiveaway.winnerCooldownMs,
+        winnerCount: createdGiveaway.winnerCount
+      });
 
       return {
         giveaway: createdGiveaway,
@@ -173,7 +231,8 @@ class GiveawayService {
 
   async endGiveawayByMessageId(messageId, {
     allowResumeEnding = false,
-    initiatedBy = 'system'
+    initiatedBy = 'system',
+    entrantIdsSnapshot = null
   } = {}) {
     const normalizedMessageId = normalizeGiveawayMessageId(messageId);
     let giveaway = this.giveawayStore.getGiveawayByMessageId(normalizedMessageId);
@@ -182,7 +241,12 @@ class GiveawayService {
       throw new Error('No giveaway was found for that message ID.');
     }
 
+    if (Array.isArray(entrantIdsSnapshot) && entrantIdsSnapshot.length) {
+      this.rememberEntryCloseSnapshot(normalizedMessageId, entrantIdsSnapshot);
+    }
+
     if (giveaway.status === 'ended') {
+      this.clearEntryCloseSnapshot(normalizedMessageId);
       return buildOutcome('already_ended', giveaway);
     }
 
@@ -204,6 +268,7 @@ class GiveawayService {
           giveaway = this.giveawayStore.getGiveawayByMessageId(normalizedMessageId) || giveaway;
 
           if (giveaway.status === 'ended') {
+            this.clearEntryCloseSnapshot(normalizedMessageId);
             return buildOutcome('already_ended', giveaway);
           }
 
@@ -222,8 +287,11 @@ class GiveawayService {
       }
 
       const result = await this.finalizeGiveaway(giveaway, {
-        initiatedBy
+        initiatedBy,
+        entrantIdsSnapshot: this.getEntryCloseSnapshot(normalizedMessageId)
       });
+
+      this.clearEntryCloseSnapshot(normalizedMessageId);
 
       this.logger.info('giveaway.ended', {
         announcementSent: result.announcementSent,
@@ -247,6 +315,7 @@ class GiveawayService {
             winnerIds: [],
             endedAt: new Date().toISOString()
           });
+          this.clearEntryCloseSnapshot(normalizedMessageId);
 
           this.logger.warn('giveaway.end_forced_without_message_access', error, {
             channelId: currentGiveaway.channelId,
@@ -320,6 +389,9 @@ class GiveawayService {
       rerolledAt,
       rerolledBy
     });
+    this.startWinnerCooldowns(updatedGiveaway, {
+      startedAt: rerolledAt
+    });
 
     let messageEdited = false;
     let announcementSent = false;
@@ -385,29 +457,76 @@ class GiveawayService {
       return;
     }
 
-    if (!isGiveawayExpired(giveaway)) {
+    if (isGiveawayExpired(giveaway)) {
+      await this.safeRemoveReactionUser(resolvedReaction, resolvedUser.id, giveaway);
+
+      if (giveaway.status === 'active') {
+        void this.endGiveawayByMessageId(giveaway.messageId, {
+          initiatedBy: 'system'
+        }).catch((error) => {
+          this.logger.warn('giveaway.expired_reaction_end_failed', error, {
+            guildId: giveaway.guildId,
+            messageId: giveaway.messageId
+          });
+        });
+      }
+
+      await this.safeNotifyExpiredReactionUser(
+        resolvedReaction.message.channel,
+        resolvedReaction.message.guild,
+        resolvedUser,
+        giveaway
+      );
       return;
     }
 
-    await this.safeRemoveReactionUser(resolvedReaction, resolvedUser.id, giveaway);
-
-    if (giveaway.status === 'active') {
-      void this.endGiveawayByMessageId(giveaway.messageId, {
-        initiatedBy: 'system'
-      }).catch((error) => {
-        this.logger.warn('giveaway.expired_reaction_end_failed', error, {
-          guildId: giveaway.guildId,
-          messageId: giveaway.messageId
-        });
-      });
+    if (!isTrackedEntryReaction) {
+      return;
     }
 
-    await this.safeNotifyExpiredReactionUser(
-      resolvedReaction.message.channel,
-      resolvedReaction.message.guild,
-      resolvedUser,
-      giveaway
-    );
+    await this.handleActiveGiveawayReaction(resolvedReaction, resolvedUser, giveaway);
+  }
+
+  async handleActiveGiveawayReaction(reaction, user, giveaway) {
+    let currentGiveaway = giveaway;
+
+    if (currentGiveaway.winnerCooldownEnabled) {
+      const activeCooldown = this.giveawayStore.getWinnerCooldownByUserId(user.id);
+
+      if (activeCooldown) {
+        currentGiveaway = this.blockGiveawayEntry(currentGiveaway, user.id);
+        await this.safeRemoveReactionUser(reaction, user.id, currentGiveaway, {
+          failureLogMessage: 'giveaway.entry_cooldown_reaction_remove_failed'
+        });
+        this.logger.info('giveaway.entry_rejected_cooldown', {
+          cooldownEndsAt: activeCooldown.cooldownEndsAt,
+          endMode: currentGiveaway.endMode,
+          guildId: currentGiveaway.guildId,
+          maxEntries: currentGiveaway.maxEntries,
+          messageId: currentGiveaway.messageId,
+          userId: user.id,
+          winnerCooldownMs: currentGiveaway.winnerCooldownMs
+        });
+        await this.safeNotifyEntryCooldownUser(
+          reaction.message.channel,
+          reaction.message.guild,
+          user,
+          currentGiveaway,
+          activeCooldown
+        );
+        return;
+      }
+    }
+
+    currentGiveaway = this.unblockGiveawayEntry(currentGiveaway, user.id);
+
+    if (normalizeGiveawayEndMode(currentGiveaway.endMode) !== GIVEAWAY_END_MODE_ENTRIES) {
+      return;
+    }
+
+    await this.maybeCloseGiveawayByEntries(reaction, currentGiveaway, {
+      triggeringUserId: user.id
+    });
   }
 
   async handleHostPrizeConfirmationMessage(message) {
@@ -453,6 +572,13 @@ class GiveawayService {
 
     this.clearScheduledGiveaway(giveaway.messageId);
 
+    if (
+      giveaway.status !== 'ending' &&
+      normalizeGiveawayEndMode(giveaway.endMode) !== GIVEAWAY_END_MODE_TIME
+    ) {
+      return;
+    }
+
     const endAtMs = Date.parse(giveaway.endAt || '');
     const delayMs =
       giveaway.status === 'ending' || !Number.isFinite(endAtMs)
@@ -476,6 +602,40 @@ class GiveawayService {
     }
 
     this.timers.set(giveaway.messageId, timer);
+  }
+
+  async recoverEntryModeGiveaway(giveaway) {
+    if (
+      !giveaway?.messageId ||
+      giveaway.status !== 'active' ||
+      normalizeGiveawayEndMode(giveaway.endMode) !== GIVEAWAY_END_MODE_ENTRIES ||
+      !Number.isFinite(giveaway.maxEntries)
+    ) {
+      return;
+    }
+
+    try {
+      const { message } = await this.fetchGiveawayMessage(giveaway);
+      const entrantIdsSnapshot = await this.collectAcceptedEntryIdsFromMessage(
+        message,
+        giveaway
+      );
+
+      if (entrantIdsSnapshot.length < giveaway.maxEntries) {
+        return;
+      }
+
+      await this.maybeCloseGiveawayByEntries(null, giveaway, {
+        entrantIdsSnapshot,
+        recoveredOnStartup: true
+      });
+    } catch (error) {
+      this.logger.warn('giveaway.entries_recovery_failed', error, {
+        guildId: giveaway.guildId,
+        maxEntries: giveaway.maxEntries,
+        messageId: giveaway.messageId
+      });
+    }
   }
 
   scheduleRetry(messageId, delayMs = 60_000) {
@@ -515,15 +675,25 @@ class GiveawayService {
     this.timers.delete(messageId);
   }
 
-  async finalizeGiveaway(giveaway) {
+  async finalizeGiveaway(giveaway, {
+    entrantIdsSnapshot = null
+  } = {}) {
     const { channel, message } = await this.fetchGiveawayMessage(giveaway);
-    const entrantIds = await this.collectEntrantIds(message, giveaway);
+    const entrantIds = Array.isArray(entrantIdsSnapshot)
+      ? await this.resolveEligibleEntrantIds(giveaway.guildId, entrantIdsSnapshot, {
+          messageId: giveaway.messageId
+        })
+      : await this.collectEntrantIds(message, giveaway);
     const winnerIds = chooseRandomEntries(entrantIds, giveaway.winnerCount);
+    const endedAt = new Date().toISOString();
     const endedGiveaway = this.giveawayStore.markGiveawayEnded({
       messageId: giveaway.messageId,
       entrantIds,
       winnerIds,
-      endedAt: new Date().toISOString()
+      endedAt
+    });
+    this.startWinnerCooldowns(endedGiveaway, {
+      startedAt: endedAt
     });
     const messageEdited = await this.safeEditGiveawayMessage(message, endedGiveaway, {
       eligibleEntrantCount: entrantIds.length
@@ -566,25 +736,146 @@ class GiveawayService {
   }
 
   async collectEntrantIds(message, giveaway) {
+    const entrantIds = await this.collectAcceptedEntryIdsFromMessage(message, giveaway);
+
+    return this.resolveEligibleEntrantIds(giveaway.guildId, entrantIds, {
+      messageId: giveaway.messageId
+    });
+  }
+
+  async collectAcceptedEntryIdsFromMessage(message, giveaway) {
     const reaction = await this.getGiveawayReaction(message);
 
     if (!reaction) {
       return [];
     }
 
+    return this.collectAcceptedEntryIdsFromReaction(reaction, giveaway);
+  }
+
+  async collectAcceptedEntryIdsFromReaction(reaction, giveaway) {
+    if (!reaction?.users || typeof reaction.users.fetch !== 'function') {
+      return [];
+    }
+
     const users = await reaction.users.fetch();
-    const botUserId = this.discordClient.user?.id || null;
-    const entrantIds = Array.from(
-      new Set(
-        users
-          .filter((user) => user.id !== botUserId)
-          .map((user) => user.id)
-      )
+    const blockedEntryIdSet = new Set(
+      Array.isArray(giveaway?.blockedEntryIds) ? giveaway.blockedEntryIds : []
     );
 
-    return this.resolveEligibleEntrantIds(giveaway.guildId, entrantIds, {
-      messageId: giveaway.messageId
+    return Array.from(
+      new Set(
+        toArray(users)
+          .map((entry) => entry?.id || null)
+          .filter(
+            (userId) =>
+              userId &&
+              userId !== this.discordClient.user?.id &&
+              !blockedEntryIdSet.has(userId)
+          )
+      )
+    );
+  }
+
+  async maybeCloseGiveawayByEntries(reaction, giveaway, {
+    triggeringUserId = null,
+    entrantIdsSnapshot = null,
+    recoveredOnStartup = false
+  } = {}) {
+    if (
+      !giveaway?.messageId ||
+      giveaway.status !== 'active' ||
+      normalizeGiveawayEndMode(giveaway.endMode) !== GIVEAWAY_END_MODE_ENTRIES ||
+      !Number.isFinite(giveaway.maxEntries)
+    ) {
+      return;
+    }
+
+    const acceptedEntrantIds = Array.isArray(entrantIdsSnapshot)
+      ? normalizeIdList(entrantIdsSnapshot)
+      : await this.collectAcceptedEntryIdsFromReaction(reaction, giveaway);
+
+    if (acceptedEntrantIds.length < giveaway.maxEntries) {
+      return;
+    }
+
+    const storedNewSnapshot = this.rememberEntryCloseSnapshot(
+      giveaway.messageId,
+      acceptedEntrantIds
+    );
+
+    if (storedNewSnapshot) {
+      this.logger.info('giveaway.closed_by_entries', {
+        entrantCount: acceptedEntrantIds.length,
+        endMode: giveaway.endMode,
+        guildId: giveaway.guildId,
+        maxEntries: giveaway.maxEntries,
+        messageId: giveaway.messageId,
+        recoveredOnStartup,
+        triggeringUserId
+      });
+    }
+
+    if (this.inFlightMessageIds.has(giveaway.messageId)) {
+      return;
+    }
+
+    await this.endGiveawayByMessageId(giveaway.messageId, {
+      initiatedBy: 'system',
+      entrantIdsSnapshot: storedNewSnapshot
+        ? acceptedEntrantIds
+        : this.getEntryCloseSnapshot(giveaway.messageId)
     });
+  }
+
+  blockGiveawayEntry(giveaway, userId) {
+    return this.syncBlockedGiveawayEntry(giveaway, userId, true);
+  }
+
+  unblockGiveawayEntry(giveaway, userId) {
+    return this.syncBlockedGiveawayEntry(giveaway, userId, false);
+  }
+
+  syncBlockedGiveawayEntry(giveaway, userId, blocked) {
+    if (!giveaway?.messageId || !userId) {
+      return giveaway;
+    }
+
+    const currentBlockedIds = normalizeIdList(giveaway.blockedEntryIds);
+    const nextBlockedIds = blocked
+      ? normalizeIdList(currentBlockedIds.concat(String(userId)))
+      : currentBlockedIds.filter((entryId) => entryId !== String(userId));
+
+    if (currentBlockedIds.length === nextBlockedIds.length) {
+      return giveaway;
+    }
+
+    return this.giveawayStore.updateGiveawayBlockedEntries({
+      messageId: giveaway.messageId,
+      blockedEntryIds: nextBlockedIds
+    }) || {
+      ...giveaway,
+      blockedEntryIds: nextBlockedIds
+    };
+  }
+
+  rememberEntryCloseSnapshot(messageId, entrantIds) {
+    const normalizedMessageId = normalizeGiveawayMessageId(messageId);
+
+    if (this.entryCloseSnapshots.has(normalizedMessageId)) {
+      return false;
+    }
+
+    this.entryCloseSnapshots.set(normalizedMessageId, normalizeIdList(entrantIds));
+    return true;
+  }
+
+  getEntryCloseSnapshot(messageId) {
+    return this.entryCloseSnapshots.get(normalizeGiveawayMessageId(messageId)) || null;
+  }
+
+  clearEntryCloseSnapshot(messageId) {
+    this.entryCloseSnapshots.delete(normalizeGiveawayMessageId(messageId));
   }
 
   async resolveEligibleEntrantIds(guildId, entrantIds, {
@@ -705,11 +996,15 @@ class GiveawayService {
             hostId: giveaway.hostId,
             endAt: giveaway.endAt,
             status: giveaway.status,
+            endMode: giveaway.endMode,
+            maxEntries: giveaway.maxEntries,
             winnerIds: giveaway.winnerIds,
             entrantCount: giveaway.entrantIds.length,
             eligibleEntrantCount,
             endedAt: giveaway.endedAt,
-            rerolledAt: giveaway.rerolledAt
+            rerolledAt: giveaway.rerolledAt,
+            winnerCooldownEnabled: giveaway.winnerCooldownEnabled,
+            winnerCooldownMs: giveaway.winnerCooldownMs
           })
         ]
       });
@@ -771,6 +1066,40 @@ class GiveawayService {
         rerolled
       });
       return false;
+    }
+  }
+
+  startWinnerCooldowns(giveaway, {
+    startedAt = new Date().toISOString()
+  } = {}) {
+    if (
+      !giveaway?.messageId ||
+      !giveaway.winnerCooldownEnabled ||
+      !Array.isArray(giveaway.winnerIds) ||
+      !giveaway.winnerIds.length
+    ) {
+      return;
+    }
+
+    const cooldownMs = normalizeGiveawayWinnerCooldownMs(giveaway.winnerCooldownMs);
+    const cooldownEndsAt = new Date(Date.parse(startedAt) + cooldownMs).toISOString();
+
+    for (const winnerId of giveaway.winnerIds) {
+      const winnerCooldown = this.giveawayStore.startWinnerCooldown({
+        userId: winnerId,
+        giveawayMessageId: giveaway.messageId,
+        guildId: giveaway.guildId,
+        cooldownEndsAt,
+        startedAt
+      });
+
+      this.logger.info('giveaway.winner_cooldown_started', {
+        cooldownEndsAt: winnerCooldown?.cooldownEndsAt || cooldownEndsAt,
+        giveawayMessageId: giveaway.messageId,
+        guildId: giveaway.guildId,
+        userId: winnerId,
+        winnerCooldownMs: cooldownMs
+      });
     }
   }
 
@@ -977,7 +1306,9 @@ class GiveawayService {
     }
   }
 
-  async safeRemoveReactionUser(reaction, userId, giveaway) {
+  async safeRemoveReactionUser(reaction, userId, giveaway, {
+    failureLogMessage = 'giveaway.expired_reaction_remove_failed'
+  } = {}) {
     if (!reaction?.users || typeof reaction.users.remove !== 'function') {
       return false;
     }
@@ -987,7 +1318,7 @@ class GiveawayService {
       return true;
     } catch (error) {
       if (!isExpectedReactionRemovalError(error)) {
-        this.logger.warn('giveaway.expired_reaction_remove_failed', error, {
+        this.logger.warn(failureLogMessage, error, {
           guildId: giveaway.guildId,
           messageId: giveaway.messageId,
           userId
@@ -995,6 +1326,61 @@ class GiveawayService {
       }
 
       return false;
+    }
+  }
+
+  async safeNotifyEntryCooldownUser(channel, guild, user, giveaway, activeCooldown) {
+    const remainingMs = Math.max(
+      0,
+      Date.parse(activeCooldown?.cooldownEndsAt || '') - Date.now()
+    );
+    const cooldownLabel = formatDurationWords(remainingMs);
+    const dmContent = buildGiveawayEntryCooldownNoticeContent({
+      prizeText: giveaway.prizeText,
+      guildName: guild?.name || null,
+      cooldownLabel
+    });
+
+    try {
+      await user.send({
+        content: dmContent
+      });
+      return;
+    } catch (error) {
+      if (!isExpectedDmFailure(error)) {
+        this.logger.warn('giveaway.entry_cooldown_dm_failed', error, {
+          guildId: giveaway.guildId,
+          messageId: giveaway.messageId,
+          userId: user.id
+        });
+      }
+    }
+
+    if (!channel?.isTextBased() || typeof channel.send !== 'function') {
+      return;
+    }
+
+    try {
+      const noticeMessage = await channel.send({
+        content: `<@${user.id}> ${buildGiveawayEntryCooldownNoticeContent({
+          prizeText: giveaway.prizeText,
+          cooldownLabel,
+          compact: true
+        })}`,
+        allowedMentions: {
+          parse: [],
+          users: [user.id]
+        }
+      });
+
+      this.scheduleEphemeralCleanup(noticeMessage);
+    } catch (error) {
+      this.logger.warn('giveaway.entry_cooldown_channel_notice_failed', error, {
+        channelId: giveaway.channelId,
+        guildId: giveaway.guildId,
+        messageId: giveaway.messageId,
+        userId: user.id
+      });
     }
   }
 
@@ -1168,6 +1554,34 @@ function resolveConfirmedWinnerId(message, announcementContext) {
   }
 
   return announcementContext.winnerIds.length === 1 ? announcementContext.winnerIds[0] : null;
+}
+
+function normalizeIdList(value) {
+  return Array.from(
+    new Set(
+      Array.isArray(value)
+        ? value
+            .map((entry) => String(entry || '').trim())
+            .filter(Boolean)
+        : []
+    )
+  );
+}
+
+function toArray(value) {
+  if (!value) {
+    return [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.slice();
+  }
+
+  if (typeof value.values === 'function') {
+    return Array.from(value.values());
+  }
+
+  return Array.from(value);
 }
 
 function getMentionedUserIds(message) {
