@@ -1,10 +1,13 @@
 const { EmbedBuilder } = require('discord.js');
-const { formatMoney, toDiscordTimestamp } = require('./formatters');
+const {
+  BOT_RUN_RESULTS_NOTE,
+  addRunResultsNote,
+  formatMoney,
+  toDiscordTimestamp
+} = require('./formatters');
 
 const RUN_EMBED_COLOR = 0x2ecc71;
 const DEFAULT_SOURCE_LABEL = 'DroqsDB Public API';
-const BOT_RUN_RESULTS_NOTE =
-  'Bot results use 19 carry capacity and private flight. For your own settings, use the site.';
 
 const SELL_PRICE_TARGETS = Object.freeze([
   Object.freeze({
@@ -110,6 +113,14 @@ function isSyntheticGuidanceRun(run) {
   return run?.isSyntheticGuidance === true;
 }
 
+function isGuidedDisplayRun(run) {
+  return (
+    isSyntheticGuidanceRun(run) ||
+    isProjectedOnArrivalRun(run) ||
+    toNumber(run?.departInMinutes) !== null
+  );
+}
+
 function buildGuidanceRun(guidance) {
   const itemName = String(guidance?.itemName || '').trim();
   const country = String(guidance?.country || '').trim();
@@ -176,23 +187,9 @@ function addFreshnessFooter(embed, generatedAt, sourceLabel = DEFAULT_SOURCE_LAB
   return embed;
 }
 
-function buildDescriptionWithDisclaimer(description, disclaimer = BOT_RUN_RESULTS_NOTE) {
-  const parts = [String(description || '').trim()].filter(Boolean);
-
-  if (disclaimer) {
-    parts.push(`*${disclaimer}*`);
-  }
-
-  return parts.join('\n\n');
-}
-
 function buildRunFieldName(run, index, {
   scopeCountry = null
 } = {}) {
-  if (isSyntheticGuidanceRun(run)) {
-    return `#${index + 1} (Next) ${[run.itemName, run.country].filter(Boolean).join(' - ')}`;
-  }
-
   const parts = [String(run?.itemName || '').trim() || 'Run'];
 
   if (
@@ -263,11 +260,58 @@ function buildRunAvailabilityAnnotations(run) {
   return annotations;
 }
 
+function buildGuidedTimingParts(run) {
+  const parts = [];
+  const departInMinutes = toNumber(run?.departInMinutes);
+  const departAtTct = formatGuidanceDepartAtTct(run?.departAtTct);
+  const availabilityWindowMinutes = toNumber(run?.availabilityWindowMinutes);
+
+  if (departInMinutes !== null) {
+    parts.push(departInMinutes <= 0 ? 'Leave now' : `Leave in ${formatDurationMinutes(departInMinutes)}`);
+  }
+
+  if (departAtTct) {
+    parts.push(departInMinutes === null ? `Depart at ${departAtTct}` : departAtTct);
+  }
+
+  if (availabilityWindowMinutes !== null) {
+    parts.push(`Window ${formatDurationMinutes(availabilityWindowMinutes)}`);
+  }
+
+  if (run?.timingTight === true) {
+    parts.push('Tight window');
+  }
+
+  return parts;
+}
+
 function buildRunStockSummary(run) {
   const annotations = buildRunAvailabilityAnnotations(run);
   const stockLabel = `Stock: ${formatCount(run.stock)}`;
 
   return annotations.length ? `${stockLabel} • ${annotations.join(' • ')}` : stockLabel;
+}
+
+function buildGuidedRunDetails(run, {
+  scopeCategory = null
+} = {}) {
+  const parts = [];
+  const scopeSummary = buildRunScopeSummary(run, { scopeCategory });
+  const stock = toNumber(run?.stock);
+
+  if (scopeSummary) {
+    parts.push(scopeSummary);
+  }
+
+  if (stock !== null) {
+    parts.push(`Stock: ${formatCount(stock)}`);
+  }
+
+  if (stock !== null && !isRunCurrentlyInStock(run)) {
+    parts.push('Projected on arrival');
+  }
+
+  return joinCompactParts(parts);
 }
 
 function formatSourceFreshness(label, source, updatedAt) {
@@ -305,18 +349,81 @@ function buildSellPriceSummary(run) {
   }).join(' | ');
 }
 
+function buildGuidedRunProfitSummary(run) {
+  return joinCompactParts([
+    toNumber(run?.profitPerMinute) !== null
+      ? `Profit/min: ${formatMoney(run.profitPerMinute, { signed: true })}`
+      : null,
+    toNumber(run?.profitPerItem) !== null
+      ? `Profit/item: ${formatMoney(run.profitPerItem, { signed: true })}`
+      : null
+  ]);
+}
+
+function buildCompactGuidedRunDescription(description, run, {
+  scopeCategory = null
+} = {}) {
+  const sections = [String(description || '').trim()].filter(Boolean);
+  const detailLines = [];
+  const targetLabel = [run?.itemName, run?.country].filter(Boolean).join(' - ');
+  const timingSummary = joinCompactParts(buildGuidedTimingParts(run));
+  const profitSummary = buildGuidedRunProfitSummary(run);
+  const detailSummary = buildGuidedRunDetails(run, { scopeCategory });
+
+  if (targetLabel) {
+    detailLines.push(`**Next best run:** ${targetLabel}`);
+  }
+
+  if (timingSummary) {
+    detailLines.push(`**Timing:** ${timingSummary}`);
+  }
+
+  if (profitSummary) {
+    detailLines.push(`**Profit:** ${profitSummary}`);
+  }
+
+  if (detailSummary) {
+    detailLines.push(`**Details:** ${detailSummary}`);
+  }
+
+  if (detailLines.length) {
+    sections.push(detailLines.join('\n'));
+  }
+
+  return sections.join('\n\n');
+}
+
+function buildCompactGuidedRunEmbed({
+  title,
+  description,
+  run,
+  generatedAt,
+  url,
+  scopeCategory = null,
+  sourceLabel = DEFAULT_SOURCE_LABEL,
+  disclaimer = BOT_RUN_RESULTS_NOTE
+}) {
+  const embed = buildBaseEmbed({
+    title,
+    description: buildCompactGuidedRunDescription(description, run, {
+      scopeCategory
+    }),
+    url
+  });
+
+  addRunResultsNote(embed, disclaimer);
+  return addFreshnessFooter(embed, generatedAt, sourceLabel);
+}
+
 function buildRunFieldValue(run, {
   scopeCategory = null
 } = {}) {
-  if (isSyntheticGuidanceRun(run)) {
-    const lines = [formatGuidance(run)];
-    const availabilityWindowMinutes = toNumber(run?.availabilityWindowMinutes);
-
-    if (availabilityWindowMinutes !== null) {
-      lines.push(`Window: ${formatDurationMinutes(availabilityWindowMinutes)}`);
-    }
-
-    return lines.filter(Boolean).join('\n');
+  if (isGuidedDisplayRun(run)) {
+    return [
+      joinCompactParts(buildGuidedTimingParts(run)),
+      buildGuidedRunProfitSummary(run),
+      buildGuidedRunDetails(run, { scopeCategory })
+    ].filter(Boolean).join('\n');
   }
 
   const scopeSummary = buildRunScopeSummary(run, { scopeCategory });
@@ -349,13 +456,28 @@ function buildRunListEmbed({
   sourceLabel = DEFAULT_SOURCE_LABEL,
   disclaimer = BOT_RUN_RESULTS_NOTE
 }) {
+  const normalizedRuns = Array.isArray(runs) ? runs.filter(Boolean) : [];
+
+  if (normalizedRuns.length === 1 && isGuidedDisplayRun(normalizedRuns[0])) {
+    return buildCompactGuidedRunEmbed({
+      title,
+      description,
+      run: normalizedRuns[0],
+      generatedAt,
+      url,
+      scopeCategory,
+      sourceLabel,
+      disclaimer
+    });
+  }
+
   const embed = buildBaseEmbed({
     title,
-    description: buildDescriptionWithDisclaimer(description, disclaimer),
+    description,
     url
   });
 
-  for (const [index, run] of runs.entries()) {
+  for (const [index, run] of normalizedRuns.entries()) {
     embed.addFields({
       name: buildRunFieldName(run, index, { scopeCountry }),
       value: buildRunFieldValue(run, { scopeCategory }),
@@ -363,6 +485,7 @@ function buildRunListEmbed({
     });
   }
 
+  addRunResultsNote(embed, disclaimer);
   return addFreshnessFooter(embed, generatedAt, sourceLabel);
 }
 
@@ -375,20 +498,17 @@ function buildBestRunEmbed({
 }) {
   const embed = buildBaseEmbed({
     title: 'Best Run Right Now',
-    description: buildDescriptionWithDisclaimer(
-      [
-        `**${[run.itemName, run.country].filter(Boolean).join(' - ')}**`,
-        joinCompactParts([
-          `Profit/min: ${formatMoney(run.profitPerMinute, { signed: true })}`,
-          `Profit/item: ${formatMoney(run.profitPerItem, { signed: true })}`
-        ]),
-        joinCompactParts([
-          run.category || null,
-          buildRunStockSummary(run)
-        ])
-      ].join('\n'),
-      disclaimer
-    ),
+    description: [
+      `**${[run.itemName, run.country].filter(Boolean).join(' - ')}**`,
+      joinCompactParts([
+        `Profit/min: ${formatMoney(run.profitPerMinute, { signed: true })}`,
+        `Profit/item: ${formatMoney(run.profitPerItem, { signed: true })}`
+      ]),
+      joinCompactParts([
+        run.category || null,
+        buildRunStockSummary(run)
+      ])
+    ].join('\n'),
     url
   });
 
@@ -408,6 +528,7 @@ function buildBestRunEmbed({
     }
   );
 
+  addRunResultsNote(embed, disclaimer);
   return addFreshnessFooter(embed, generatedAt, sourceLabel);
 }
 

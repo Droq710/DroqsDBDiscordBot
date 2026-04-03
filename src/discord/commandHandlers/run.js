@@ -171,9 +171,9 @@ async function execute(interaction, context) {
         await interaction.editReply({
           embeds: [
             buildGuidedRunList({
-              title: 'Next Guided Departure',
+              title: 'Next Run Available',
               description:
-                'No profitable runs are live right now. This is the next backend-guided profitable departure.',
+                'No profitable runs are live right now. Showing the next available departure.',
               payload,
               runs: fallbackRuns,
               context
@@ -233,10 +233,12 @@ async function execute(interaction, context) {
             buildGuidedRunList({
               title:
                 fallbackRuns.length === 1
-                  ? 'Next Guided Departure'
-                  : `Next ${fallbackRuns.length} Guided Departures`,
+                  ? 'Next Run Available'
+                  : `Next ${fallbackRuns.length} Runs`,
               description:
-                'No profitable runs are live right now. These are the next backend-guided profitable departures from DroqsDB.',
+                `No profitable runs are live right now. Showing the next available departure${
+                  fallbackRuns.length === 1 ? '' : 's'
+                }.`,
               payload,
               runs: fallbackRuns,
               context
@@ -298,10 +300,12 @@ async function execute(interaction, context) {
             buildGuidedRunList({
               title:
                 fallbackRuns.length === 1
-                  ? `Next ${sellTarget.titleLabel} Departure`
-                  : `Next ${fallbackRuns.length} ${sellTarget.titleLabel} Departures`,
+                  ? `Next ${sellTarget.titleLabel} Run`
+                  : `Next ${fallbackRuns.length} ${sellTarget.titleLabel} Runs`,
               description:
-                `No profitable ${sellTarget.descriptionLabel} runs are live right now. These are the next backend-guided profitable departures.`,
+                `No profitable ${sellTarget.descriptionLabel} runs are live right now. Showing the next available departure${
+                  fallbackRuns.length === 1 ? '' : 's'
+                }.`,
               payload,
               runs: fallbackRuns,
               context
@@ -365,7 +369,9 @@ async function execute(interaction, context) {
             buildGuidedRunList({
               title: `Next Runs for ${payload.country}`,
               description:
-                'No profitable runs are live right now for that country. These are the next backend-guided profitable departures.',
+                `No profitable runs are live right now for that country. Showing the next available departure${
+                  fallbackRuns.length === 1 ? '' : 's'
+                }.`,
               payload,
               runs: fallbackRuns,
               context,
@@ -429,7 +435,9 @@ async function execute(interaction, context) {
             buildGuidedRunList({
               title: `Next Runs for ${payload.item.itemName}`,
               description:
-                `${payload.item.category || 'Category unavailable'} - No profitable runs are live right now. These are the next backend-guided profitable departures.`,
+                `No profitable runs are live right now for this item. Showing the next available departure${
+                  fallbackRuns.length === 1 ? '' : 's'
+                }.`,
               payload,
               runs: fallbackRuns,
               context,
@@ -499,10 +507,12 @@ async function execute(interaction, context) {
             buildGuidedRunList({
               title:
                 fallbackRuns.length === 1
-                  ? `Next ${categoryLabel(payload.category)} Departure`
-                  : `Next ${categoryLabel(payload.category)} Departures`,
+                  ? `Next ${categoryLabel(payload.category)} Run`
+                  : `Next ${categoryLabel(payload.category)} Runs`,
               description:
-                'No profitable runs are live right now in that category. These are the next backend-guided profitable departures.',
+                `No profitable runs are live right now in that category. Showing the next available departure${
+                  fallbackRuns.length === 1 ? '' : 's'
+                }.`,
               payload,
               runs: fallbackRuns,
               context,

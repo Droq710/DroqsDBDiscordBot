@@ -61,6 +61,9 @@ const HELP_GROUPS = Object.freeze([
   })
 ]);
 
+const BOT_RUN_RESULTS_NOTE =
+  'Bot results use 19 carry capacity and private flight. Adjust your own settings on [DroqsDB](https://droqsdb.com).';
+
 const moneyFormatter = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
@@ -269,6 +272,22 @@ function addFreshnessFooter(embed, generatedAt, sourceLabel = 'DroqsDB Public AP
 
   embed.setFooter({
     text: footerText
+  });
+
+  return embed;
+}
+
+function addRunResultsNote(embed, note = BOT_RUN_RESULTS_NOTE) {
+  const normalizedNote = String(note || '').trim();
+
+  if (!normalizedNote) {
+    return embed;
+  }
+
+  embed.addFields({
+    name: '\u200b',
+    value: `*${normalizedNote}*`,
+    inline: false
   });
 
   return embed;
@@ -659,69 +678,91 @@ function buildRunEmptyStateGuidanceEmbed({
 
   if (!normalizedGuidance?.kind) {
     return addFreshnessFooter(
-      buildBaseEmbed({
-        title,
-        description: fallbackDescription,
-        color: COLORS.info,
-        url
-      }),
+      addRunResultsNote(
+        buildBaseEmbed({
+          title,
+          description: fallbackDescription,
+          color: COLORS.info,
+          url
+        })
+      ),
       generatedAt,
       sourceLabel
     );
   }
 
   if (normalizedGuidance.kind === 'next_run') {
-    const lines = ['No profitable runs are live right now.'];
     const targetLabel = [normalizedGuidance.itemName, normalizedGuidance.country]
       .filter(Boolean)
       .join(' - ');
     const timingDetails = [];
+    const detailLines = [];
+    const sections = ['No profitable runs are live right now.'];
 
     if (targetLabel) {
-      lines.push(`Next best run: **${targetLabel}**`);
+      detailLines.push(`**Next best run:** ${targetLabel}`);
     }
 
     if (normalizedGuidance.departureMinutes !== null) {
       timingDetails.push(
-        `Leave: **${
+        `${
           normalizedGuidance.departureMinutes <= 0
-            ? 'now'
-            : `in ${formatDurationMinutes(normalizedGuidance.departureMinutes)}`
-        }**`
+            ? 'Leave now'
+            : `Leave in ${formatDurationMinutes(normalizedGuidance.departureMinutes)}`
+        }`
       );
     }
 
     const departAtTct = formatGuidanceDepartAtTct(normalizedGuidance);
 
     if (departAtTct) {
-      timingDetails.push(`TCT: ${departAtTct}`);
+      timingDetails.push(
+        normalizedGuidance.departureMinutes === null ? `Depart at ${departAtTct}` : departAtTct
+      );
     }
 
     if (normalizedGuidance.availabilityWindowMinutes !== null) {
       timingDetails.push(
-        `Window: ${formatDurationMinutes(normalizedGuidance.availabilityWindowMinutes, {
+        `Window ${formatDurationMinutes(normalizedGuidance.availabilityWindowMinutes, {
           approximate: true
         })}`
       );
     }
 
     if (timingDetails.length) {
-      lines.push(timingDetails.join(' | '));
+      detailLines.push(`**Timing:** ${timingDetails.join(' | ')}`);
+    }
+
+    if (
+      normalizedGuidance.messageDetailed &&
+      normalizedGuidance.messageDetailed !== normalizedGuidance.messageShort
+    ) {
+      detailLines.push(normalizedGuidance.messageDetailed);
+    }
+
+    if (!detailLines.length && normalizedGuidance.messageShort) {
+      sections.push(normalizedGuidance.messageShort);
+    } else if (!detailLines.length && fallbackDescription) {
+      sections.push(fallbackDescription);
+    }
+
+    if (detailLines.length) {
+      sections.push(detailLines.join('\n'));
     }
 
     if (normalizedGuidance.tightWindow) {
-      lines.push('Tight window. Be ready to leave fast.');
-    } else if (!targetLabel && !timingDetails.length && normalizedGuidance.messageShort) {
-      lines.push(normalizedGuidance.messageShort);
+      sections.push('Tight window. Be ready to leave fast.');
     }
 
     return addFreshnessFooter(
-      buildBaseEmbed({
-        title,
-        description: lines.join('\n'),
-        color: COLORS.info,
-        url
-      }),
+      addRunResultsNote(
+        buildBaseEmbed({
+          title,
+          description: sections.filter(Boolean).join('\n\n'),
+          color: COLORS.info,
+          url
+        })
+      ),
       generatedAt,
       sourceLabel
     );
@@ -735,15 +776,17 @@ function buildRunEmptyStateGuidanceEmbed({
       'Upcoming timing is too unstable to call a reliable departure window.';
 
     return addFreshnessFooter(
-      buildBaseEmbed({
-        title,
-        description: [
-          'No profitable runs are live right now.',
-          message
-        ].join('\n'),
-        color: COLORS.warning,
-        url
-      }),
+      addRunResultsNote(
+        buildBaseEmbed({
+          title,
+          description: [
+            'No profitable runs are live right now.',
+            message
+          ].join('\n\n'),
+          color: COLORS.warning,
+          url
+        })
+      ),
       generatedAt,
       sourceLabel
     );
@@ -751,24 +794,28 @@ function buildRunEmptyStateGuidanceEmbed({
 
   if (normalizedGuidance.kind === 'no_viable_runs') {
     return addFreshnessFooter(
-      buildBaseEmbed({
-        title,
-        description: fallbackDescription,
-        color: COLORS.info,
-        url
-      }),
+      addRunResultsNote(
+        buildBaseEmbed({
+          title,
+          description: fallbackDescription,
+          color: COLORS.info,
+          url
+        })
+      ),
       generatedAt,
       sourceLabel
     );
   }
 
   return addFreshnessFooter(
-    buildBaseEmbed({
-      title,
-      description: fallbackDescription,
-      color: COLORS.info,
-      url
-    }),
+    addRunResultsNote(
+      buildBaseEmbed({
+        title,
+        description: fallbackDescription,
+        color: COLORS.info,
+        url
+      })
+    ),
     generatedAt,
     sourceLabel
   );
@@ -1058,6 +1105,8 @@ function truncateText(value, maxLength) {
 }
 
 module.exports = {
+  BOT_RUN_RESULTS_NOTE,
+  addRunResultsNote,
   buildAutopostSectionsEmbed,
   buildAutopostStatusEmbed,
   buildBestRunEmbed,
