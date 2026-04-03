@@ -117,6 +117,29 @@ test('giveaway leaderboard embed formats ranked winners cleanly', () => {
   assert.match(embed.data.description, /2\. UserB - 5 wins/);
 });
 
+test('giveaway leaderboard embed falls back to username and wins', () => {
+  const embed = buildGiveawayLeaderboardEmbed({
+    entries: [
+      {
+        userId: '111',
+        username: 'Droq',
+        wins: 3
+      },
+      {
+        userId: '222',
+        wins: 2
+      },
+      {
+        wins: 1
+      }
+    ]
+  });
+
+  assert.match(embed.data.description, /1\. Droq - 3 wins/);
+  assert.match(embed.data.description, /2\. User 222 - 2 wins/);
+  assert.match(embed.data.description, /3\. Unknown User - 1 win/);
+});
+
 test('mini-game giveaway announcements include the narrated game result', () => {
   const content = buildGiveawayAnnouncementContent({
     prizeText: '2x Xanax',

@@ -415,45 +415,51 @@ class GiveawayService {
   async resolveLeaderboardDisplayEntries(guild, leaderboardEntries, {
     messageId = null
   } = {}) {
-    const resolvedEntries = await Promise.all(
-      (Array.isArray(leaderboardEntries) ? leaderboardEntries : []).map(async (entry) => ({
+    const resolvedEntries = [];
+    const displayLabelCache = new Map();
+
+    for (const entry of Array.isArray(leaderboardEntries) ? leaderboardEntries : []) {
+      if (!entry) {
+        continue;
+      }
+
+      resolvedEntries.push({
         ...entry,
         displayLabel: await this.resolveLeaderboardDisplayLabel(guild, entry, {
-          messageId
+          messageId,
+          displayLabelCache
         })
-      }))
-    );
+      });
+    }
 
     return resolvedEntries;
   }
 
   async resolveLeaderboardDisplayLabel(guild, entry, {
-    messageId = null
+    messageId = null,
+    displayLabelCache = null
   } = {}) {
-    const memberLabel = await this.resolveGuildMemberLabel(guild, entry?.userId, {
+    const userId = String(entry?.userId || '').trim();
+
+    if (!userId) {
+      return 'Unknown User';
+    }
+
+    if (displayLabelCache instanceof Map && displayLabelCache.has(userId)) {
+      return displayLabelCache.get(userId);
+    }
+
+    const member = await this.fetchGuildMember(guild, userId, {
       logMessage: 'leaderboard.member_fetch_failed',
       messageId
     });
+    const displayLabel = member?.displayName ?? member?.user?.username ?? 'Unknown User';
 
-    if (memberLabel) {
-      return memberLabel;
+    if (displayLabelCache instanceof Map) {
+      displayLabelCache.set(userId, displayLabel);
     }
 
-    if (entry?.storedLabel) {
-      return String(entry.storedLabel);
-    }
-
-    const userLabel = await this.resolveGlobalUserLabel(entry?.userId, {
-      logMessage: 'leaderboard.user_fetch_failed',
-      guildId: guild?.id || null,
-      messageId
-    });
-
-    if (userLabel) {
-      return userLabel;
-    }
-
-    return `User ${entry?.userId || 'Unknown'}`;
+    return displayLabel;
   }
 
   async resolveWinnerIdentitySnapshots(guildId, messageId, winnerIds) {
@@ -493,24 +499,13 @@ class GiveawayService {
     messageId = null,
     logMessage = 'giveaway.member_fetch_failed'
   } = {}) {
-    if (!guild?.members || typeof guild.members.fetch !== 'function' || !userId) {
-      return null;
-    }
+    const member = await this.fetchGuildMember(guild, userId, {
+      guildId,
+      messageId,
+      logMessage
+    });
 
-    try {
-      const member = await guild.members.fetch(userId);
-      return buildPreferredMemberLabel(member);
-    } catch (error) {
-      if (!isUnknownMemberError(error)) {
-        this.logger.warn(logMessage, error, {
-          guildId,
-          messageId,
-          userId
-        });
-      }
-
-      return null;
-    }
+    return buildPreferredMemberLabel(member);
   }
 
   async resolveGlobalUserLabel(userId, {
@@ -531,6 +526,42 @@ class GiveawayService {
           guildId,
           messageId,
           userId
+        });
+      }
+
+      return null;
+    }
+  }
+
+  async fetchGuildMember(guild, userId, {
+    guildId = guild?.id || null,
+    messageId = null,
+    logMessage = 'giveaway.member_fetch_failed'
+  } = {}) {
+    const normalizedUserId = String(userId || '').trim();
+
+    if (!normalizedUserId) {
+      return null;
+    }
+
+    const cachedMember = guild?.members?.cache?.get?.(normalizedUserId) || null;
+
+    if (cachedMember) {
+      return cachedMember;
+    }
+
+    if (!guild?.members || typeof guild.members.fetch !== 'function') {
+      return null;
+    }
+
+    try {
+      return await guild.members.fetch(normalizedUserId);
+    } catch (error) {
+      if (!isUnknownMemberError(error)) {
+        this.logger.warn(logMessage, error, {
+          guildId,
+          messageId,
+          userId: normalizedUserId
         });
       }
 

@@ -61,10 +61,13 @@ async function execute(interaction, context) {
     const leaderboard = context.giveawayService.getLeaderboard(interaction.guildId, {
       limit: 10
     });
+    const leaderboardEntries = await resolveLeaderboardEntries(interaction.guild, leaderboard, {
+      logger: context.logger
+    });
 
     context.logger.info('giveaway.leaderboard_requested', {
       guildId: interaction.guildId,
-      rankedUserCount: leaderboard.length,
+      rankedUserCount: leaderboardEntries.length,
       userId: interaction.user.id
     });
 
@@ -72,7 +75,7 @@ async function execute(interaction, context) {
       embeds: [
         buildGiveawayLeaderboardEmbed({
           guildName: interaction.guild?.name || null,
-          entries: leaderboard
+          entries: leaderboardEntries
         })
       ]
     });
@@ -371,6 +374,73 @@ function buildGiveawayStartSummary({
   return lines.join('\n');
 }
 
+async function resolveLeaderboardEntries(guild, leaderboardEntries, {
+  logger = console
+} = {}) {
+  const resolvedEntries = [];
+  const displayLabelCache = new Map();
+
+  for (const entry of Array.isArray(leaderboardEntries) ? leaderboardEntries : []) {
+    if (!entry) {
+      continue;
+    }
+
+    const normalizedUserId = String(entry.userId || '').trim();
+    let displayLabel = 'Unknown User';
+
+    if (displayLabelCache.has(normalizedUserId)) {
+      displayLabel = displayLabelCache.get(normalizedUserId);
+    } else {
+      displayLabel = await resolveLeaderboardDisplayLabel(guild, normalizedUserId, {
+        logger
+      });
+      displayLabelCache.set(normalizedUserId, displayLabel);
+    }
+
+    resolvedEntries.push({
+      ...entry,
+      displayLabel
+    });
+  }
+
+  return resolvedEntries;
+}
+
+async function resolveLeaderboardDisplayLabel(guild, userId, {
+  logger = console
+} = {}) {
+  const normalizedUserId = String(userId || '').trim();
+
+  if (!normalizedUserId) {
+    return 'Unknown User';
+  }
+
+  const cachedMember = guild?.members?.cache?.get?.(normalizedUserId) || null;
+
+  if (cachedMember) {
+    return cachedMember.displayName ?? cachedMember.user?.username ?? 'Unknown User';
+  }
+
+  if (!guild?.members || typeof guild.members.fetch !== 'function') {
+    return 'Unknown User';
+  }
+
+  try {
+    const member = await guild.members.fetch(normalizedUserId);
+    return member?.displayName ?? member?.user?.username ?? 'Unknown User';
+  } catch (error) {
+    if (!isUnknownMemberError(error)) {
+      logger?.warn?.('leaderboard.member_fetch_failed', error, {
+        guildId: guild?.id || null,
+        messageId: null,
+        userId: normalizedUserId
+      });
+    }
+
+    return 'Unknown User';
+  }
+}
+
 function formatPermissionName(permission) {
   switch (permission) {
     case PermissionFlagsBits.ViewChannel:
@@ -386,6 +456,10 @@ function formatPermissionName(permission) {
     default:
       return String(permission);
   }
+}
+
+function isUnknownMemberError(error) {
+  return [10007, 10013].includes(Number(error?.code));
 }
 
 module.exports = {

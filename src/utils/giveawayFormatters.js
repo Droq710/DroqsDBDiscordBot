@@ -383,14 +383,25 @@ function formatWinnerAnnouncementTargets(winnerIds, winnerProfiles = []) {
 }
 
 function formatGiveawayLeaderboardLine(entry, index) {
-  const resolvedWinCount = normalizeCount(entry?.winCount) || 0;
+  const resolvedWinCount = normalizeCount(entry?.wins ?? entry?.winCount) || 0;
   const winLabel = resolvedWinCount === 1 ? 'win' : 'wins';
   const displayLabel = truncateText(
-    sanitizeMentions(entry?.displayLabel || entry?.storedLabel || `User ${entry?.userId || 'Unknown'}`),
+    sanitizeMentions(resolveGiveawayLeaderboardDisplayLabel(entry)),
     80
   );
 
   return `${index + 1}. ${displayLabel} - ${formatCount(resolvedWinCount)} ${winLabel}`;
+}
+
+function resolveGiveawayLeaderboardDisplayLabel(entry) {
+  const name =
+    entry?.displayLabel ||
+    entry?.username ||
+    entry?.storedLabel ||
+    (entry?.userId ? `User ${entry.userId}` : null) ||
+    'Unknown User';
+
+  return name;
 }
 
 function formatGiveawayStatusLine(giveaway) {

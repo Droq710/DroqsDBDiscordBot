@@ -155,9 +155,26 @@ test('GiveawayService posts the giveaway leaderboard once per day into #giveaway
   });
   const guild = createLeaderboardGuild({
     channel,
-    memberLabels: {
-      'winner-1': 'Winner One Live',
-      'winner-2': 'Winner Two Live'
+    cachedMembers: {
+      'winner-1': {
+        displayName: 'Winner One Live',
+        user: {
+          username: 'winner-one'
+        }
+      }
+    },
+    fetchedMembers: {
+      'winner-2': {
+        displayName: null,
+        user: {
+          username: 'Winner Two User'
+        }
+      }
+    },
+    fetchErrors: {
+      'winner-3': Object.assign(new Error('Unknown Member'), {
+        code: 10007
+      })
     }
   });
   const store = {
@@ -173,6 +190,11 @@ test('GiveawayService posts the giveaway leaderboard once per day into #giveaway
               userId: 'winner-2',
               storedLabel: 'Winner Two',
               winCount: 2
+            },
+            {
+              userId: 'winner-3',
+              storedLabel: 'Winner Three',
+              winCount: 1
             }
           ]
         : [];
@@ -207,6 +229,9 @@ test('GiveawayService posts the giveaway leaderboard once per day into #giveaway
   assert.equal(Array.isArray(sentPayloads[0].embeds), true);
   assert.equal(sentPayloads[0].embeds[0].data.title, 'Giveaway Leaderboard');
   assert.match(sentPayloads[0].embeds[0].data.description, /1\. Winner One Live - 4 wins/);
+  assert.match(sentPayloads[0].embeds[0].data.description, /2\. Winner Two User - 2 wins/);
+  assert.match(sentPayloads[0].embeds[0].data.description, /3\. Unknown User - 1 win/);
+  assert.equal(guild.fetchedUserIds.includes('winner-1'), false);
   assert.equal(leaderboardClaims[0].postDateUtc, '2026-04-02');
   assert.deepEqual(completedPost, {
     guildId: 'guild-1',
@@ -324,11 +349,28 @@ function createLeaderboardDiscordClient(guild) {
 
 function createLeaderboardGuild({
   channel,
-  memberLabels = {}
+  cachedMembers = {},
+  fetchedMembers = {},
+  fetchErrors = {}
 } = {}) {
+  const cacheEntries = Object.entries(cachedMembers).map(([userId, member]) => [
+    userId,
+    {
+      id: userId,
+      displayName: member.displayName ?? null,
+      nickname: member.nickname ?? null,
+      user: {
+        username: member.user?.username ?? null,
+        globalName: member.user?.globalName ?? null
+      }
+    }
+  ]);
+  const fetchedUserIds = [];
+
   return {
     id: 'guild-1',
     name: 'DroqsDB',
+    fetchedUserIds,
     channels: {
       cache: new Map([[channel.id, channel]]),
       async fetch() {
@@ -336,14 +378,23 @@ function createLeaderboardGuild({
       }
     },
     members: {
+      cache: new Map(cacheEntries),
       async fetch(userId) {
+        fetchedUserIds.push(userId);
+
+        if (Object.prototype.hasOwnProperty.call(fetchErrors, userId)) {
+          throw fetchErrors[userId];
+        }
+
+        const fetchedMember = fetchedMembers[userId];
+
         return {
           id: userId,
-          displayName: memberLabels[userId] || null,
-          nickname: null,
+          displayName: fetchedMember?.displayName ?? null,
+          nickname: fetchedMember?.nickname ?? null,
           user: {
-            username: memberLabels[userId] || `user-${userId}`,
-            globalName: null
+            username: fetchedMember?.user?.username ?? `user-${userId}`,
+            globalName: fetchedMember?.user?.globalName ?? null
           }
         };
       }

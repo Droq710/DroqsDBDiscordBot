@@ -31,8 +31,32 @@ test('giveaway start rejects multiple winners for mini-game modes', async () => 
 });
 
 test('giveaway leaderboard returns a public leaderboard embed', async () => {
+  const guild = createLeaderboardGuild({
+    cachedMembers: {
+      'winner-1': {
+        displayName: 'Droq',
+        user: {
+          username: 'droq-user'
+        }
+      }
+    },
+    fetchedMembers: {
+      'winner-2': {
+        displayName: null,
+        user: {
+          username: 'Carl'
+        }
+      }
+    },
+    fetchErrors: {
+      'winner-3': Object.assign(new Error('Unknown Member'), {
+        code: 10007
+      })
+    }
+  });
   const interaction = createInteractionStub({
-    subcommand: 'leaderboard'
+    subcommand: 'leaderboard',
+    guild
   });
 
   await execute(interaction, {
@@ -41,8 +65,15 @@ test('giveaway leaderboard returns a public leaderboard embed', async () => {
         return [
           {
             userId: 'winner-1',
-            storedLabel: 'Winner One',
             winCount: 3
+          },
+          {
+            userId: 'winner-2',
+            winCount: 2
+          },
+          {
+            userId: 'winner-3',
+            winCount: 1
           }
         ];
       }
@@ -55,22 +86,24 @@ test('giveaway leaderboard returns a public leaderboard embed', async () => {
   });
   assert.equal(Array.isArray(interaction.replyPayload?.embeds), true);
   assert.equal(interaction.replyPayload.embeds[0].data.title, 'Giveaway Leaderboard');
-  assert.match(interaction.replyPayload.embeds[0].data.description, /Winner One - 3 wins/);
+  assert.match(interaction.replyPayload.embeds[0].data.description, /1\. Droq - 3 wins/);
+  assert.match(interaction.replyPayload.embeds[0].data.description, /2\. Carl - 2 wins/);
+  assert.match(interaction.replyPayload.embeds[0].data.description, /3\. Unknown User - 1 win/);
+  assert.deepEqual(guild.fetchedUserIds, ['winner-2', 'winner-3']);
 });
 
 function createInteractionStub({
   subcommand = 'start',
   strings = {},
   integers = {},
-  booleans = {}
+  booleans = {},
+  guild = createLeaderboardGuild()
 } = {}) {
   const interaction = {
     deferredPayload: null,
     replyPayload: null,
-    guildId: 'guild-1',
-    guild: {
-      name: 'DroqsDB'
-    },
+    guildId: guild.id,
+    guild,
     user: {
       id: 'user-1'
     },
@@ -117,6 +150,55 @@ function createInteractionStub({
   };
 
   return interaction;
+}
+
+function createLeaderboardGuild({
+  cachedMembers = {},
+  fetchedMembers = {},
+  fetchErrors = {}
+} = {}) {
+  const cacheEntries = Object.entries(cachedMembers).map(([userId, member]) => [
+    userId,
+    {
+      id: userId,
+      displayName: member.displayName ?? null,
+      user: {
+        username: member.user?.username ?? null
+      }
+    }
+  ]);
+  const fetchedUserIds = [];
+
+  return {
+    id: 'guild-1',
+    name: 'DroqsDB',
+    fetchedUserIds,
+    members: {
+      cache: new Map(cacheEntries),
+      async fetch(userId) {
+        fetchedUserIds.push(userId);
+
+        if (Object.prototype.hasOwnProperty.call(fetchErrors, userId)) {
+          throw fetchErrors[userId];
+        }
+
+        if (!Object.prototype.hasOwnProperty.call(fetchedMembers, userId)) {
+          throw Object.assign(new Error('Unknown Member'), {
+            code: 10007
+          });
+        }
+
+        const member = fetchedMembers[userId];
+        return {
+          id: userId,
+          displayName: member.displayName ?? null,
+          user: {
+            username: member.user?.username ?? null
+          }
+        };
+      }
+    }
+  };
 }
 
 function createSilentLogger() {
