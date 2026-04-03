@@ -30,29 +30,45 @@ const EXPIRED_REACTION_FALLBACK_DELETE_DELAY_MS = 15_000;
 const GIVEAWAYS_ROLE_NAME = 'Giveaways';
 const RECENT_GIVEAWAY_ANNOUNCEMENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_RECENT_GIVEAWAY_ANNOUNCEMENTS = 50;
-const PRIZE_DELIVERY_FORUM_URL =
+const DEFAULT_PRIZE_DELIVERY_FORUM_URL =
   'https://www.torn.com/forums.php#/p=threads&f=14&t=16551076';
+const RUSSIAN_ROULETTE_REVEAL_DELAY_MS = 1_250;
+const RUSSIAN_ROULETTE_REVEAL_HEADING = 'Russian Roulette:';
 const GIVEAWAY_LEADERBOARD_CRON = '0 23 * * *';
 const GIVEAWAY_LEADERBOARD_TIMEZONE = 'UTC';
 const GIVEAWAY_LEADERBOARD_CHANNEL_NAME = 'giveaways';
 const GIVEAWAY_LEADERBOARD_LIMIT = 10;
-const PRIZE_CONFIRMATION_PATTERNS = Object.freeze([
+const GENERIC_PRIZE_CONFIRMATION_PATTERNS = Object.freeze([
   /\b(?:prize|reward|winnings|payout|payment)\s+(?:was\s+|has\s+been\s+)?sent\b/i,
   /\bsent\s+(?:the\s+)?(?:prize|reward|winnings|payout|payment|cash|item|trade)\b/i,
   /\b(?:trade|payout|payment)\s+sent\b/i,
   /\b(?:prize|reward|winnings|payout|payment)\s+delivered\b/i,
   /\bpaid\s+out\b/i
 ]);
+const TORN_PRIZE_CONFIRMATION_PATTERNS = Object.freeze([
+  /^You(?:\s+have)?\s+sent\s+(.+?)\s+to\s+(.+?)(?:\s+with\s+the\s+message:\s+(.+))?[.!]?$/i
+]);
+const TORN_PRIZE_CONFIRMATION_PREFIX_PATTERN =
+  /^\d{1,2}:\d{2}:\d{2}\s*-\s*\d{1,2}\/\d{1,2}\/\d{2,4}\s+/;
 
 class GiveawayService {
   constructor({
     discordClient,
     giveawayStore,
-    logger = console
+    logger = console,
+    prizeDeliveryForumUrl = process.env.GIVEAWAY_PRIZE_DELIVERY_FORUM_URL || DEFAULT_PRIZE_DELIVERY_FORUM_URL,
+    russianRouletteRevealDelayMs = RUSSIAN_ROULETTE_REVEAL_DELAY_MS,
+    delayFn = delay
   }) {
     this.discordClient = discordClient;
     this.giveawayStore = giveawayStore;
     this.logger = logger;
+    this.prizeDeliveryForumUrl = String(prizeDeliveryForumUrl || '').trim() || DEFAULT_PRIZE_DELIVERY_FORUM_URL;
+    this.russianRouletteRevealDelayMs = Math.max(
+      0,
+      Math.floor(Number(russianRouletteRevealDelayMs) || RUSSIAN_ROULETTE_REVEAL_DELAY_MS)
+    );
+    this.delayFn = typeof delayFn === 'function' ? delayFn : delay;
     this.timers = new Map();
     this.inFlightMessageIds = new Set();
     this.entryCloseSnapshots = new Map();
@@ -513,13 +529,26 @@ class GiveawayService {
     messageId = null,
     logMessage = 'giveaway.user_fetch_failed'
   } = {}) {
+    const user = await this.fetchGlobalUser(userId, {
+      guildId,
+      messageId,
+      logMessage
+    });
+
+    return buildPreferredUserLabel(user);
+  }
+
+  async fetchGlobalUser(userId, {
+    guildId = null,
+    messageId = null,
+    logMessage = 'giveaway.user_fetch_failed'
+  } = {}) {
     if (!userId || !this.discordClient.users || typeof this.discordClient.users.fetch !== 'function') {
       return null;
     }
 
     try {
-      const user = await this.discordClient.users.fetch(userId);
-      return buildPreferredUserLabel(user);
+      return await this.discordClient.users.fetch(userId);
     } catch (error) {
       if (!isUnknownMemberError(error)) {
         this.logger.warn(logMessage, error, {
@@ -927,6 +956,9 @@ class GiveawayService {
 
     try {
       const { channel, message } = await this.fetchGiveawayMessage(updatedGiveaway);
+      await this.safeRevealRussianRouletteOnGiveawayMessage(message, updatedGiveaway, {
+        gameResult
+      });
       messageEdited = await this.safeEditGiveawayMessage(message, updatedGiveaway, {
         eligibleEntrantCount: eligibleEntrantIds.length,
         gameResult
@@ -1073,18 +1105,19 @@ class GiveawayService {
     }
 
     const content = String(message.content || '').trim();
+    const prizeConfirmation = parsePrizeConfirmationMessage(content);
 
-    if (!content || !isPrizeConfirmationMessage(content)) {
+    if (!content || !prizeConfirmation) {
       return;
     }
 
-    const announcementContext = this.findRecentGiveawayAnnouncement(message);
+    const announcementContext = this.findRecentGiveawayAnnouncement(message, prizeConfirmation);
 
     if (!announcementContext) {
       return;
     }
 
-    const winnerId = resolveConfirmedWinnerId(message, announcementContext);
+    const winnerId = resolveConfirmedWinnerId(message, announcementContext, prizeConfirmation);
 
     if (!winnerId) {
       return;
@@ -1219,6 +1252,9 @@ class GiveawayService {
       : await this.collectEntrantIds(message, giveaway);
     const gameResult = this.resolveGameResult(giveaway, entrantIds, {
       phase: 'end'
+    });
+    await this.safeRevealRussianRouletteOnGiveawayMessage(message, giveaway, {
+      gameResult
     });
     const endedAt = new Date().toISOString();
     const winnerSnapshots = await this.resolveWinnerIdentitySnapshots(
@@ -1573,17 +1609,87 @@ class GiveawayService {
     }
   }
 
+  async safeRevealRussianRouletteOnGiveawayMessage(message, giveaway, {
+    gameResult = null
+  } = {}) {
+    if (
+      !shouldUseProgressiveRussianRouletteReveal(giveaway, gameResult) ||
+      typeof message?.edit !== 'function'
+    ) {
+      return false;
+    }
+
+    const revealState = splitRussianRouletteDetailLines(gameResult?.detailLines);
+    const baseContent = stripRussianRouletteRevealFromMessageContent(message.content);
+    let visibleDetailLines = revealState.introLines.slice();
+
+    try {
+      if (!revealState.revealLines.length) {
+        if (!visibleDetailLines.length) {
+          return false;
+        }
+
+        await message.edit({
+          content: buildRussianRouletteRevealMessageContent({
+            baseContent,
+            detailLines: visibleDetailLines
+          }),
+          allowedMentions: {
+            parse: []
+          }
+        });
+
+        return true;
+      }
+
+      for (let index = 0; index < revealState.revealLines.length; index += 1) {
+        visibleDetailLines = visibleDetailLines.concat(revealState.revealLines[index]);
+
+        await message.edit({
+          content: buildRussianRouletteRevealMessageContent({
+            baseContent,
+            detailLines: visibleDetailLines
+          }),
+          allowedMentions: {
+            parse: []
+          }
+        });
+
+        if (index < revealState.revealLines.length - 1) {
+          await this.delayFn(this.russianRouletteRevealDelayMs);
+        }
+      }
+
+      return true;
+    } catch (error) {
+      this.logger.warn('giveaway.russian_roulette_reveal_failed', error, {
+        channelId: giveaway?.channelId || null,
+        guildId: giveaway?.guildId || null,
+        messageId: giveaway?.messageId || null
+      });
+      return false;
+    }
+  }
+
   async safeSendAnnouncement(channel, giveaway, {
     rerolled = false,
     eligibleEntrantCount = null,
     gameResult = null
   } = {}) {
+    let winnerReferences = [];
     let winnerProfiles = [];
 
     try {
-      winnerProfiles = await this.resolveWinnerAnnouncementProfiles(giveaway);
+      winnerReferences = await this.resolveWinnerAnnouncementReferences(giveaway);
+      winnerProfiles = winnerReferences
+        .filter((reference) => reference?.winnerId && reference?.profileUrl)
+        .map((reference) => ({
+          winnerId: String(reference.winnerId),
+          profileUrl: reference.profileUrl,
+          tornId: reference.tornId || null
+        }));
     } catch (error) {
-      this.logger.warn('giveaway.winner_profile_resolution_failed', error, {
+      this.logger.warn('giveaway.winner_reference_resolution_failed', error, {
         guildId: giveaway.guildId,
         messageId: giveaway.messageId
       });
@@ -1600,17 +1706,16 @@ class GiveawayService {
       winnerCount: giveaway.winnerCount,
       rerolled
     });
+    const allowedMentions = buildAnnouncementAllowedMentions(giveaway.winnerIds);
 
     try {
       const announcementMessage = await channel.send({
         content,
-        allowedMentions: {
-          parse: [],
-          users: giveaway.winnerIds
-        }
+        allowedMentions
       });
       this.recordRecentGiveawayAnnouncement(giveaway, {
-        announcementMessageId: announcementMessage?.id || null
+        announcementMessageId: announcementMessage?.id || null,
+        winnerReferences
       });
 
       return true;
@@ -1711,7 +1816,7 @@ class GiveawayService {
     return gameResult;
   }
 
-  async resolveWinnerAnnouncementProfiles(giveaway) {
+  async resolveWinnerAnnouncementReferences(giveaway) {
     const winnerIds = Array.isArray(giveaway?.winnerIds) ? giveaway.winnerIds : [];
 
     if (!winnerIds.length) {
@@ -1724,40 +1829,57 @@ class GiveawayService {
       return [];
     }
 
-    const profiles = await Promise.all(
+    const references = await Promise.all(
       winnerIds.map((winnerId) =>
-        this.resolveWinnerAnnouncementProfile(guild, winnerId, {
+        this.resolveWinnerAnnouncementReference(guild, winnerId, {
           guildId: giveaway.guildId,
           messageId: giveaway.messageId
         })
       )
     );
 
-    return profiles.filter(Boolean);
+    return references.filter(Boolean);
   }
 
-  async resolveWinnerAnnouncementProfile(guild, winnerId, {
+  async resolveWinnerAnnouncementReference(guild, winnerId, {
     guildId,
     messageId
   } = {}) {
-    try {
-      const member = await guild.members.fetch(winnerId);
-      return buildWinnerAnnouncementProfile(member, winnerId);
-    } catch (error) {
-      if (!isUnknownMemberError(error)) {
-        this.logger.warn('giveaway.winner_member_fetch_failed', error, {
+    const member = await this.fetchGuildMember(guild, winnerId, {
+      guildId,
+      messageId,
+      logMessage: 'giveaway.winner_member_fetch_failed'
+    });
+    const user = member?.user
+      ? member.user
+      : await this.fetchGlobalUser(winnerId, {
           guildId,
           messageId,
-          userId: winnerId
+          logMessage: 'giveaway.winner_user_fetch_failed'
         });
-      }
+    const aliases = collectWinnerReferenceAliases([
+      member?.displayName,
+      member?.nickname,
+      member?.user?.globalName,
+      member?.user?.username,
+      member?.user?.tag,
+      user?.globalName,
+      user?.username,
+      user?.tag
+    ]);
+    const tornId = extractTornIdFromMember(member) || extractTornIdFromUser(user);
 
-      return null;
-    }
+    return {
+      aliases,
+      profileUrl: tornId ? buildTornProfileUrl(tornId) : null,
+      tornId,
+      winnerId: String(winnerId)
+    };
   }
 
   recordRecentGiveawayAnnouncement(giveaway, {
-    announcementMessageId = null
+    announcementMessageId = null,
+    winnerReferences = []
   } = {}) {
     if (!giveaway?.messageId) {
       return;
@@ -1773,12 +1895,13 @@ class GiveawayService {
       hostId: giveaway.hostId,
       prizeText: giveaway.prizeText,
       recordedAt: Date.now(),
+      winnerReferences: normalizeWinnerReferences(winnerReferences),
       winnerIds: Array.isArray(giveaway.winnerIds) ? giveaway.winnerIds.slice() : []
     });
     this.trimRecentGiveawayAnnouncements();
   }
 
-  findRecentGiveawayAnnouncement(message) {
+  findRecentGiveawayAnnouncement(message, prizeConfirmation = null) {
     this.pruneRecentGiveawayAnnouncements();
 
     const recentAnnouncements = Array.from(this.recentGiveawayAnnouncements.values()).filter(
@@ -1825,6 +1948,24 @@ class GiveawayService {
       return matchingAnnouncements.length === 1 ? matchingAnnouncements[0] : null;
     }
 
+    if (prizeConfirmation) {
+      const matchingAnnouncements = recentAnnouncements.filter((announcement) =>
+        announcementMatchesPrizeConfirmation(announcement, prizeConfirmation)
+      );
+
+      if (matchingAnnouncements.length === 1) {
+        return matchingAnnouncements[0];
+      }
+
+      if (matchingAnnouncements.length > 1) {
+        return null;
+      }
+
+      if (hasPrizeConfirmationRecipient(prizeConfirmation)) {
+        return null;
+      }
+    }
+
     return recentAnnouncements.length === 1 ? recentAnnouncements[0] : null;
   }
 
@@ -1853,8 +1994,8 @@ class GiveawayService {
   async safeSendPrizeDeliveryFollowUp(message, winnerId, announcementContext) {
     const payload = {
       content:
-        `<@${winnerId}> your prize should be with you now. ` +
-        `When you have a moment, please share your win on the DroqsDB forum: ${PRIZE_DELIVERY_FORUM_URL}`,
+        `Congrats <@${winnerId}>, your prize should be with you now. ` +
+        `When you have a moment, please share your win on the DroqsDB forum: ${this.prizeDeliveryForumUrl}`,
       allowedMentions: {
         parse: [],
         repliedUser: false,
@@ -2183,20 +2324,6 @@ function normalizeDisplayLabel(value) {
   return normalized ? normalized.slice(0, 120) : null;
 }
 
-function buildWinnerAnnouncementProfile(member, winnerId) {
-  const tornId = extractTornIdFromMember(member);
-
-  if (!tornId) {
-    return null;
-  }
-
-  return {
-    winnerId: String(winnerId),
-    tornId,
-    profileUrl: buildTornProfileUrl(tornId)
-  };
-}
-
 function extractTornIdFromMember(member) {
   const candidates = [
     member?.displayName,
@@ -2216,15 +2343,180 @@ function extractTornIdFromMember(member) {
   return null;
 }
 
+function extractTornIdFromUser(user) {
+  const candidates = [
+    user?.globalName,
+    user?.username,
+    user?.tag
+  ];
+
+  for (const candidate of candidates) {
+    const tornId = extractTornIdFromText(candidate);
+
+    if (tornId) {
+      return tornId;
+    }
+  }
+
+  return null;
+}
+
 function buildTornProfileUrl(tornId) {
   return `https://www.torn.com/profiles.php?XID=${tornId}`;
 }
 
-function isPrizeConfirmationMessage(content) {
-  return PRIZE_CONFIRMATION_PATTERNS.some((pattern) => pattern.test(content));
+function buildAnnouncementAllowedMentions(winnerIds = []) {
+  return {
+    parse: [],
+    users: normalizeIdList(winnerIds)
+  };
 }
 
-function resolveConfirmedWinnerId(message, announcementContext) {
+function shouldUseProgressiveRussianRouletteReveal(giveaway, gameResult) {
+  return (
+    normalizeGiveawayGameType(giveaway?.gameType) === 'russian_roulette_standard' &&
+    normalizeGiveawayGameType(gameResult?.gameType) === 'russian_roulette_standard' &&
+    Array.isArray(gameResult?.detailLines) &&
+    gameResult.detailLines.some((line) => /^\d+\./.test(String(line || '').trim()))
+  );
+}
+
+function splitRussianRouletteDetailLines(detailLines) {
+  const normalizedLines = Array.isArray(detailLines)
+    ? detailLines.map((line) => String(line || '').trim()).filter(Boolean)
+    : [];
+
+  return {
+    introLines: normalizedLines.filter((line) => !/^\d+\./.test(line)),
+    revealLines: normalizedLines.filter((line) => /^\d+\./.test(line))
+  };
+}
+
+function buildRussianRouletteRevealMessageContent({
+  baseContent = '',
+  detailLines = []
+} = {}) {
+  const sections = [];
+  const normalizedBaseContent = String(baseContent || '').trim();
+  const normalizedDetailLines = Array.isArray(detailLines)
+    ? detailLines.map((line) => String(line || '').trim()).filter(Boolean)
+    : [];
+
+  if (normalizedBaseContent) {
+    sections.push(normalizedBaseContent);
+  }
+
+  sections.push(RUSSIAN_ROULETTE_REVEAL_HEADING);
+
+  if (normalizedDetailLines.length) {
+    sections.push(normalizedDetailLines.join('\n'));
+  }
+
+  return sections.join('\n\n');
+}
+
+function stripRussianRouletteRevealFromMessageContent(content) {
+  const normalizedContent = String(content || '').trim();
+
+  if (!normalizedContent) {
+    return '';
+  }
+
+  const lines = normalizedContent.split(/\r?\n/);
+  const headingIndex = lines.findIndex(
+    (line) => String(line || '').trim() === RUSSIAN_ROULETTE_REVEAL_HEADING
+  );
+
+  if (headingIndex === -1) {
+    return normalizedContent;
+  }
+
+  return lines
+    .slice(0, headingIndex)
+    .join('\n')
+    .trim();
+}
+
+function parsePrizeConfirmationMessage(content) {
+  const normalizedContent = normalizePrizeConfirmationContent(content);
+  const normalizedTornContent = stripTornPrizeConfirmationPrefix(normalizedContent);
+
+  if (!normalizedTornContent) {
+    return null;
+  }
+
+  for (const pattern of TORN_PRIZE_CONFIRMATION_PATTERNS) {
+    const match = normalizedTornContent.match(pattern);
+
+    if (!match) {
+      continue;
+    }
+
+    return {
+      messageText: match[3] ? String(match[3]).trim() : null,
+      rawContent: normalizedContent,
+      recipientText: String(match[2] || '').trim(),
+      recipientTornId: extractTornIdFromText(match[2]),
+      type: 'torn_send',
+      valueText: String(match[1] || '').trim()
+    };
+  }
+
+  if (GENERIC_PRIZE_CONFIRMATION_PATTERNS.some((pattern) => pattern.test(normalizedTornContent))) {
+    return {
+      rawContent: normalizedContent,
+      recipientText: null,
+      recipientTornId: null,
+      type: 'generic'
+    };
+  }
+
+  return null;
+}
+
+function normalizePrizeConfirmationContent(content) {
+  let normalized = String(content || '').trim();
+
+  if (!normalized) {
+    return '';
+  }
+
+  normalized = stripWrappingPair(normalized, '"', '"');
+  normalized = stripWrappingPair(normalized, "'", "'");
+  normalized = stripWrappingPair(normalized, '`', '`');
+  normalized = stripWrappingPair(normalized, '“', '”');
+  normalized = normalized.replace(/^>\s*/, '');
+
+  return normalized.replace(/\s+/g, ' ').trim();
+}
+
+function stripTornPrizeConfirmationPrefix(content) {
+  return String(content || '')
+    .replace(TORN_PRIZE_CONFIRMATION_PREFIX_PATTERN, '')
+    .trim();
+}
+
+function stripWrappingPair(value, startToken, endToken) {
+  const normalized = String(value || '').trim();
+
+  if (!normalized.startsWith(startToken) || !normalized.endsWith(endToken)) {
+    return normalized;
+  }
+
+  return normalized.slice(startToken.length, normalized.length - endToken.length).trim();
+}
+
+function announcementMatchesPrizeConfirmation(announcement, prizeConfirmation) {
+  return normalizeWinnerReferences(announcement?.winnerReferences).some((winnerReference) =>
+    winnerReferenceMatchesPrizeConfirmation(winnerReference, prizeConfirmation)
+  );
+}
+
+function hasPrizeConfirmationRecipient(prizeConfirmation) {
+  return Boolean(prizeConfirmation?.recipientTornId || prizeConfirmation?.recipientText);
+}
+
+function resolveConfirmedWinnerId(message, announcementContext, prizeConfirmation = null) {
   const mentionedWinnerIds = getMentionedUserIds(message).filter((winnerId) =>
     announcementContext.winnerIds.includes(winnerId)
   );
@@ -2233,7 +2525,127 @@ function resolveConfirmedWinnerId(message, announcementContext) {
     return mentionedWinnerIds[0];
   }
 
+  const matchedWinnerIds = normalizeWinnerReferences(announcementContext?.winnerReferences)
+    .filter((winnerReference) =>
+      announcementContext.winnerIds.includes(winnerReference.winnerId) &&
+      winnerReferenceMatchesPrizeConfirmation(winnerReference, prizeConfirmation)
+    )
+    .map((winnerReference) => winnerReference.winnerId);
+
+  if (matchedWinnerIds.length === 1) {
+    return matchedWinnerIds[0];
+  }
+
   return announcementContext.winnerIds.length === 1 ? announcementContext.winnerIds[0] : null;
+}
+
+function winnerReferenceMatchesPrizeConfirmation(winnerReference, prizeConfirmation) {
+  if (!winnerReference || !prizeConfirmation) {
+    return false;
+  }
+
+  if (
+    prizeConfirmation.recipientTornId &&
+    winnerReference.tornId &&
+    String(prizeConfirmation.recipientTornId) === String(winnerReference.tornId)
+  ) {
+    return true;
+  }
+
+  const recipientKey = canonicalizeWinnerMatchText(prizeConfirmation.recipientText);
+
+  if (!recipientKey) {
+    return false;
+  }
+
+  return winnerReference.aliases.some(
+    (alias) => canonicalizeWinnerMatchText(alias) === recipientKey
+  );
+}
+
+function collectWinnerReferenceAliases(values) {
+  const aliases = new Set();
+
+  for (const value of Array.isArray(values) ? values : []) {
+    const normalized = normalizeDisplayLabel(value);
+
+    if (!normalized) {
+      continue;
+    }
+
+    aliases.add(normalized);
+
+    const withoutTornId = normalizeDisplayLabel(
+      normalized
+        .replace(/\[\d{4,10}\]/g, ' ')
+        .replace(/\(\d{4,10}\)/g, ' ')
+    );
+
+    if (withoutTornId) {
+      aliases.add(withoutTornId);
+    }
+  }
+
+  return Array.from(aliases);
+}
+
+function normalizeWinnerReferences(value) {
+  const winnerReferences = [];
+  const seenWinnerIds = new Set();
+
+  for (const entry of Array.isArray(value) ? value : []) {
+    const winnerId = String(entry?.winnerId || '').trim();
+
+    if (!winnerId || seenWinnerIds.has(winnerId)) {
+      continue;
+    }
+
+    seenWinnerIds.add(winnerId);
+    winnerReferences.push({
+      aliases: collectWinnerReferenceAliases(entry?.aliases),
+      tornId: entry?.tornId ? String(entry.tornId).trim() : null,
+      winnerId
+    });
+  }
+
+  return winnerReferences;
+}
+
+function canonicalizeWinnerMatchText(value) {
+  const normalized = String(value || '').toLowerCase();
+
+  return normalized
+    .replace(/\[\d{4,10}\]/g, ' ')
+    .replace(/\(\d{4,10}\)/g, ' ')
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function formatWinnerAnnouncementTargets(winnerIds, winnerProfiles = []) {
+  const resolvedWinnerIds = normalizeIdList(winnerIds);
+  const profileMap = new Map(
+    (Array.isArray(winnerProfiles) ? winnerProfiles : [])
+      .filter((entry) => entry?.winnerId && entry?.profileUrl)
+      .map((entry) => [String(entry.winnerId), entry.profileUrl])
+  );
+
+  return resolvedWinnerIds.length
+    ? resolvedWinnerIds
+        .map((winnerId) => {
+          const profileUrl = profileMap.get(String(winnerId));
+          return profileUrl ? `<@${winnerId}> (${profileUrl})` : `<@${winnerId}>`;
+        })
+        .join(', ')
+    : 'No winners';
+}
+
+function truncateTextForAnnouncement(value, maxLength = 1024) {
+  const normalized = String(value || '').replace(/@/g, '@\u200b').trim() || 'Unavailable';
+
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
 function normalizeIdList(value) {
@@ -2266,6 +2678,16 @@ function toArray(value) {
 
 function getMentionedUserIds(message) {
   return Array.from(message?.mentions?.users?.keys?.() || []);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, Math.max(0, Math.floor(Number(ms) || 0)));
+
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+  });
 }
 
 function isUnrecoverableDiscordError(error) {

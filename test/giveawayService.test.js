@@ -139,6 +139,118 @@ test('GiveawayService closes entry-target giveaways with an accepted entrant sna
   );
 });
 
+test('GiveawayService reveals Russian Roulette one shot at a time on the giveaway message', async () => {
+  const edits = [];
+  const delays = [];
+  const service = new GiveawayService({
+    discordClient: createDiscordClientStub(),
+    giveawayStore: {},
+    logger: createSilentLogger(),
+    russianRouletteRevealDelayMs: 250,
+    delayFn: async (ms) => {
+      delays.push(ms);
+    }
+  });
+  const message = {
+    content: '<@&giveaways-role>',
+    async edit(payload) {
+      edits.push(payload);
+      this.content = payload.content;
+      return this;
+    }
+  };
+
+  const revealed = await service.safeRevealRussianRouletteOnGiveawayMessage(
+    message,
+    createGiveawayRecord({
+      gameType: 'russian_roulette_standard'
+    }),
+    {
+      gameResult: {
+        gameType: 'russian_roulette_standard',
+        detailLines: [
+          'Players: <@user-1> vs <@user-2>',
+          '1. <@user-1> pulls the trigger... click.',
+          '2. <@user-2> pulls the trigger... click.',
+          '3. <@user-1> pulls the trigger... BANG.'
+        ]
+      }
+    }
+  );
+
+  assert.equal(revealed, true);
+  assert.equal(edits.length, 3);
+  assert.match(edits[0].content, /Russian Roulette:/);
+  assert.match(edits[0].content, /1\. <@user-1> pulls the trigger\.\.\. click\./);
+  assert.doesNotMatch(edits[0].content, /2\. <@user-2> pulls the trigger\.\.\. click\./);
+  assert.match(edits[1].content, /2\. <@user-2> pulls the trigger\.\.\. click\./);
+  assert.doesNotMatch(edits[1].content, /3\. <@user-1> pulls the trigger\.\.\. BANG\./);
+  assert.match(edits[2].content, /3\. <@user-1> pulls the trigger\.\.\. BANG\./);
+  assert.deepEqual(delays, [250, 250]);
+  assert.deepEqual(edits.map((payload) => payload.allowedMentions), [
+    {
+      parse: []
+    },
+    {
+      parse: []
+    },
+    {
+      parse: []
+    }
+  ]);
+});
+
+test('GiveawayService recognizes Torn sent lines with timestamps and prompts the winner once', async () => {
+  const giveaway = createGiveawayRecord({
+    hostId: 'host-1',
+    status: 'ended',
+    winnerIds: ['winner-1']
+  });
+  const replies = [];
+  const service = new GiveawayService({
+    discordClient: createDiscordClientStub(),
+    giveawayStore: {},
+    logger: createSilentLogger(),
+    prizeDeliveryForumUrl: 'https://example.com/forum-thread'
+  });
+
+  service.recordRecentGiveawayAnnouncement(giveaway, {
+    announcementMessageId: 'announcement-1',
+    winnerReferences: [
+      {
+        winnerId: 'winner-1',
+        aliases: ['yoshanbao [4135166]']
+      }
+    ]
+  });
+
+  const message = {
+    guildId: giveaway.guildId,
+    channelId: giveaway.channelId,
+    author: {
+      id: giveaway.hostId,
+      bot: false
+    },
+    content:
+      '03:24:45 - 03/04/26 You sent $1,000,000 to yoshanbao with the message: DroqsDB Discord Winner!',
+    mentions: {
+      users: new Map()
+    },
+    async reply(payload) {
+      replies.push(payload);
+      return payload;
+    }
+  };
+
+  await service.handleHostPrizeConfirmationMessage(message);
+  await service.handleHostPrizeConfirmationMessage(message);
+
+  assert.equal(replies.length, 1);
+  assert.match(replies[0].content, /Congrats <@winner-1>/);
+  assert.match(replies[0].content, /https:\/\/example\.com\/forum-thread/);
+  assert.equal(service.recentGiveawayAnnouncements.get(giveaway.messageId)?.followUpSent, true);
+});
+
 test('GiveawayService posts the giveaway leaderboard once per day into #giveaways', async () => {
   const sentPayloads = [];
   const logger = createLoggerSpy();
