@@ -150,6 +150,7 @@ function createGiveawayRecord(overrides = {}) {
     durationMs: 15 * 60 * 1000,
     endAt: '2099-01-01T00:15:00.000Z',
     endMode: 'time',
+    gameType: 'standard',
     maxEntries: null,
     winnerCooldownEnabled: false,
     winnerCooldownMs: 3 * 60 * 1000,

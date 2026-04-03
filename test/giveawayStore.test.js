@@ -7,7 +7,8 @@ const Database = require('better-sqlite3');
 const { GiveawayStore } = require('../src/services/giveawayStore');
 const {
   DEFAULT_GIVEAWAY_WINNER_COOLDOWN_MS,
-  GIVEAWAY_END_MODE_TIME
+  GIVEAWAY_END_MODE_TIME,
+  GIVEAWAY_GAME_TYPE_STANDARD
 } = require('../src/utils/giveaway');
 
 const TEST_TMP_ROOT = path.join(__dirname, '.tmp');
@@ -102,6 +103,7 @@ test('GiveawayStore applies safe defaults to legacy giveaway rows', async (t) =>
   const giveaway = store.getGiveawayByMessageId('1234567890');
 
   assert.equal(giveaway.endMode, GIVEAWAY_END_MODE_TIME);
+  assert.equal(giveaway.gameType, GIVEAWAY_GAME_TYPE_STANDARD);
   assert.equal(giveaway.maxEntries, null);
   assert.equal(giveaway.winnerCooldownEnabled, false);
   assert.equal(giveaway.winnerCooldownMs, DEFAULT_GIVEAWAY_WINNER_COOLDOWN_MS);

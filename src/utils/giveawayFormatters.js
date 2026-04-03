@@ -5,7 +5,10 @@ const {
   GIVEAWAY_END_MODE_ENTRIES,
   GIVEAWAY_END_MODE_TIME,
   formatDurationWords,
+  getGiveawayGameTypeLabel,
+  isMiniGameGiveawayType,
   normalizeGiveawayEndMode,
+  normalizeGiveawayGameType,
   normalizeGiveawayWinnerCooldownEnabled,
   normalizeGiveawayWinnerCooldownMs
 } = require('./giveaway');
@@ -28,17 +31,20 @@ function buildGiveawayEmbed({
   endAt,
   status = 'active',
   endMode = GIVEAWAY_END_MODE_TIME,
+  gameType = 'standard',
   maxEntries = null,
   winnerIds = [],
   entrantCount = null,
   eligibleEntrantCount = null,
   endedAt = null,
   rerolledAt = null,
+  gameSummaryLine = null,
   winnerCooldownEnabled = false,
   winnerCooldownMs = DEFAULT_GIVEAWAY_WINNER_COOLDOWN_MS
 }) {
   const isEnded = status === 'ended';
   const normalizedEndMode = normalizeGiveawayEndMode(endMode);
+  const normalizedGameType = normalizeGiveawayGameType(gameType);
   const resolvedWinnerIds = normalizeIdList(winnerIds);
   const resolvedEntrantCount = normalizeCount(entrantCount);
   const resolvedEligibleEntrantCount =
@@ -69,6 +75,11 @@ function buildGiveawayEmbed({
         normalizedEndMode === GIVEAWAY_END_MODE_ENTRIES
           ? 'Entry target'
           : 'Timed',
+      inline: true
+    },
+    {
+      name: 'Game',
+      value: getGiveawayGameTypeLabel(normalizedGameType),
       inline: true
     },
     {
@@ -169,11 +180,21 @@ function buildGiveawayEmbed({
     });
   }
 
+  if (isMiniGameGiveawayType(normalizedGameType) && gameSummaryLine) {
+    embed.addFields({
+      name: 'Resolution',
+      value: truncateText(gameSummaryLine, 1024),
+      inline: false
+    });
+  }
+
   return embed;
 }
 
 function buildGiveawayAnnouncementContent({
   prizeText,
+  gameType = 'standard',
+  gameResult = null,
   winnerIds = [],
   winnerProfiles = [],
   entrantCount = 0,
@@ -181,11 +202,39 @@ function buildGiveawayAnnouncementContent({
   winnerCount = 1,
   rerolled = false
 }) {
+  const normalizedGameType = normalizeGiveawayGameType(gameType);
   const resolvedWinnerIds = normalizeIdList(winnerIds);
   const resolvedEligibleEntrantCount =
     normalizeCount(eligibleEntrantCount) ?? normalizeCount(entrantCount) ?? 0;
   const safePrizeText = truncateText(sanitizeMentions(prizeText), 200);
   const statusLabel = rerolled ? 'Passenger manifest updated' : 'Flight closed';
+  const gameLines = Array.isArray(gameResult?.detailLines)
+    ? gameResult.detailLines.map((detailLine) => String(detailLine || '').trim()).filter(Boolean)
+    : [];
+
+  if (isMiniGameGiveawayType(normalizedGameType)) {
+    const lines = [
+      `${GIVEAWAY_EMOJI} ${statusLabel} for **${safePrizeText}**.`,
+      `Mini-game: ${gameResult?.gameLabel || getGiveawayGameTypeLabel(normalizedGameType)}`
+    ];
+
+    if (!resolvedWinnerIds.length) {
+      lines.push(
+        'No eligible passengers were available to finish the mini-game.'
+      );
+      return lines.join('\n');
+    }
+
+    if (gameLines.length) {
+      lines.push(...gameLines);
+    }
+
+    lines.push(
+      `Winner: ${formatWinnerAnnouncementTargets(resolvedWinnerIds, winnerProfiles)}`
+    );
+
+    return lines.join('\n');
+  }
 
   if (!resolvedWinnerIds.length) {
     return `${GIVEAWAY_EMOJI} ${statusLabel} for **${safePrizeText}**.\nNo eligible passengers were available${rerolled ? ' for this reroll.' : '.'}`;
@@ -308,6 +357,7 @@ function formatWinnerAnnouncementTargets(winnerIds, winnerProfiles = []) {
 
 function formatGiveawayStatusLine(giveaway) {
   const normalizedEndMode = normalizeGiveawayEndMode(giveaway?.endMode);
+  const normalizedGameType = normalizeGiveawayGameType(giveaway?.gameType);
   const isClosingNow =
     giveaway.status === 'ending' || isPastTimestamp(giveaway.endAt);
   const scheduleLabel = isClosingNow
@@ -321,6 +371,7 @@ function formatGiveawayStatusLine(giveaway) {
     joinCompactParts([
       `<#${giveaway.channelId}>`,
       `${formatCount(giveaway.winnerCount)} winner(s)`,
+      getGiveawayGameTypeLabel(normalizedGameType),
       normalizedEndMode === GIVEAWAY_END_MODE_ENTRIES && normalizeCount(giveaway.maxEntries) !== null
         ? `${formatCount(giveaway.maxEntries)} entry goal`
         : 'Timed'

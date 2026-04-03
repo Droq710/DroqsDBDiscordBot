@@ -39,6 +39,7 @@ test('entry-target giveaway embeds show entry goal and cooldown setting', () => 
     hostId: '999',
     status: 'active',
     endMode: 'entries',
+    gameType: 'dice_duel',
     maxEntries: 25,
     winnerCooldownEnabled: true,
     winnerCooldownMs: 3 * 60 * 1000
@@ -46,6 +47,14 @@ test('entry-target giveaway embeds show entry goal and cooldown setting', () => 
   const fields = embed.data.fields || [];
 
   assert.match(embed.data.description, /25 entries are reached/);
+  assert.deepEqual(
+    fields.find((field) => field.name === 'Game'),
+    {
+      name: 'Game',
+      value: 'Dice Duel',
+      inline: true
+    }
+  );
   assert.deepEqual(
     fields.find((field) => field.name === 'Entry Goal'),
     {
@@ -71,6 +80,7 @@ test('giveaway status shows entry-target closing rule', () => {
         prizeText: 'Rare Plushie',
         channelId: '123',
         winnerCount: 2,
+        gameType: 'coin_flip_battle',
         endMode: 'entries',
         maxEntries: 50,
         status: 'active',
@@ -80,7 +90,31 @@ test('giveaway status shows entry-target closing rule', () => {
   });
 
   assert.match(embed.data.description, /50 entry goal/);
+  assert.match(embed.data.description, /Coin Flip Battle/);
   assert.match(embed.data.description, /Closes when 50 entries are reached/);
+});
+
+test('mini-game giveaway announcements include the narrated game result', () => {
+  const content = buildGiveawayAnnouncementContent({
+    prizeText: '2x Xanax',
+    gameType: 'russian_roulette_standard',
+    gameResult: {
+      gameLabel: 'Russian Roulette',
+      detailLines: [
+        'Players: <@111> vs <@222>',
+        '1. <@111> pulls the trigger... click.',
+        '2. <@222> pulls the trigger... BANG.'
+      ]
+    },
+    winnerIds: ['111'],
+    entrantCount: 8,
+    eligibleEntrantCount: 8,
+    winnerCount: 1
+  });
+
+  assert.match(content, /Mini-game: Russian Roulette/);
+  assert.match(content, /Players: <@111> vs <@222>/);
+  assert.match(content, /Winner: <@111>/);
 });
 
 test('cooldown notices include the remaining wait time', () => {

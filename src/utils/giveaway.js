@@ -3,10 +3,70 @@ const { randomInt } = require('node:crypto');
 const GIVEAWAY_EMOJI = '✈️';
 const GIVEAWAY_END_MODE_TIME = 'time';
 const GIVEAWAY_END_MODE_ENTRIES = 'entries';
+const GIVEAWAY_GAME_TYPE_STANDARD = 'standard';
+const GIVEAWAY_GAME_TYPE_RUSSIAN_ROULETTE_STANDARD =
+  'russian_roulette_standard';
+const GIVEAWAY_GAME_TYPE_RUSSIAN_ROULETTE_EXTREME =
+  'russian_roulette_extreme';
+const GIVEAWAY_GAME_TYPE_DICE_DUEL = 'dice_duel';
+const GIVEAWAY_GAME_TYPE_DOUBLE_OR_NOTHING = 'double_or_nothing';
+const GIVEAWAY_GAME_TYPE_LAST_MAN_STANDING = 'last_man_standing';
+const GIVEAWAY_GAME_TYPE_SLOT_MACHINE = 'slot_machine';
+const GIVEAWAY_GAME_TYPE_COIN_FLIP_BATTLE = 'coin_flip_battle';
+const GIVEAWAY_GAME_TYPE_RISK_RUN = 'risk_run';
 const DEFAULT_GIVEAWAY_WINNER_COOLDOWN_MS = 3 * 60 * 1000;
 const ENTRY_MODE_PLACEHOLDER_END_AT = '9999-12-31T23:59:59.999Z';
 const MIN_GIVEAWAY_DURATION_MS = 60_000;
 const MAX_GIVEAWAY_DURATION_MS = 14 * 24 * 60 * 60 * 1000;
+const GIVEAWAY_GAME_TYPE_LABELS = Object.freeze({
+  [GIVEAWAY_GAME_TYPE_STANDARD]: 'Standard',
+  [GIVEAWAY_GAME_TYPE_RUSSIAN_ROULETTE_STANDARD]: 'Russian Roulette',
+  [GIVEAWAY_GAME_TYPE_RUSSIAN_ROULETTE_EXTREME]: 'Russian Roulette Extreme',
+  [GIVEAWAY_GAME_TYPE_DICE_DUEL]: 'Dice Duel',
+  [GIVEAWAY_GAME_TYPE_DOUBLE_OR_NOTHING]: 'Double or Nothing',
+  [GIVEAWAY_GAME_TYPE_LAST_MAN_STANDING]: 'Last Man Standing',
+  [GIVEAWAY_GAME_TYPE_SLOT_MACHINE]: 'Slot Machine',
+  [GIVEAWAY_GAME_TYPE_COIN_FLIP_BATTLE]: 'Coin Flip Battle',
+  [GIVEAWAY_GAME_TYPE_RISK_RUN]: 'Risk Run'
+});
+const GIVEAWAY_GAME_TYPE_CHOICES = Object.freeze([
+  {
+    name: GIVEAWAY_GAME_TYPE_LABELS[GIVEAWAY_GAME_TYPE_STANDARD],
+    value: GIVEAWAY_GAME_TYPE_STANDARD
+  },
+  {
+    name: 'Russian Roulette - Standard',
+    value: GIVEAWAY_GAME_TYPE_RUSSIAN_ROULETTE_STANDARD
+  },
+  {
+    name: 'Russian Roulette - Extreme',
+    value: GIVEAWAY_GAME_TYPE_RUSSIAN_ROULETTE_EXTREME
+  },
+  {
+    name: GIVEAWAY_GAME_TYPE_LABELS[GIVEAWAY_GAME_TYPE_DICE_DUEL],
+    value: GIVEAWAY_GAME_TYPE_DICE_DUEL
+  },
+  {
+    name: GIVEAWAY_GAME_TYPE_LABELS[GIVEAWAY_GAME_TYPE_DOUBLE_OR_NOTHING],
+    value: GIVEAWAY_GAME_TYPE_DOUBLE_OR_NOTHING
+  },
+  {
+    name: GIVEAWAY_GAME_TYPE_LABELS[GIVEAWAY_GAME_TYPE_LAST_MAN_STANDING],
+    value: GIVEAWAY_GAME_TYPE_LAST_MAN_STANDING
+  },
+  {
+    name: GIVEAWAY_GAME_TYPE_LABELS[GIVEAWAY_GAME_TYPE_SLOT_MACHINE],
+    value: GIVEAWAY_GAME_TYPE_SLOT_MACHINE
+  },
+  {
+    name: GIVEAWAY_GAME_TYPE_LABELS[GIVEAWAY_GAME_TYPE_COIN_FLIP_BATTLE],
+    value: GIVEAWAY_GAME_TYPE_COIN_FLIP_BATTLE
+  },
+  {
+    name: GIVEAWAY_GAME_TYPE_LABELS[GIVEAWAY_GAME_TYPE_RISK_RUN],
+    value: GIVEAWAY_GAME_TYPE_RISK_RUN
+  }
+]);
 
 function parseGiveawayDuration(value) {
   const normalized = String(value || '')
@@ -97,6 +157,27 @@ function normalizeGiveawayEndMode(value) {
     : GIVEAWAY_END_MODE_TIME;
 }
 
+function normalizeGiveawayGameType(value) {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase();
+
+  return Object.prototype.hasOwnProperty.call(
+    GIVEAWAY_GAME_TYPE_LABELS,
+    normalized
+  )
+    ? normalized
+    : GIVEAWAY_GAME_TYPE_STANDARD;
+}
+
+function getGiveawayGameTypeLabel(value) {
+  return GIVEAWAY_GAME_TYPE_LABELS[normalizeGiveawayGameType(value)];
+}
+
+function isMiniGameGiveawayType(value) {
+  return normalizeGiveawayGameType(value) !== GIVEAWAY_GAME_TYPE_STANDARD;
+}
+
 function normalizeGiveawayMaxEntries(value) {
   if (value === null || value === undefined || value === '') {
     return null;
@@ -180,13 +261,27 @@ module.exports = {
   GIVEAWAY_EMOJI,
   GIVEAWAY_END_MODE_ENTRIES,
   GIVEAWAY_END_MODE_TIME,
+  GIVEAWAY_GAME_TYPE_CHOICES,
+  GIVEAWAY_GAME_TYPE_COIN_FLIP_BATTLE,
+  GIVEAWAY_GAME_TYPE_DICE_DUEL,
+  GIVEAWAY_GAME_TYPE_DOUBLE_OR_NOTHING,
+  GIVEAWAY_GAME_TYPE_LABELS,
+  GIVEAWAY_GAME_TYPE_LAST_MAN_STANDING,
+  GIVEAWAY_GAME_TYPE_RISK_RUN,
+  GIVEAWAY_GAME_TYPE_RUSSIAN_ROULETTE_EXTREME,
+  GIVEAWAY_GAME_TYPE_RUSSIAN_ROULETTE_STANDARD,
+  GIVEAWAY_GAME_TYPE_SLOT_MACHINE,
+  GIVEAWAY_GAME_TYPE_STANDARD,
   MAX_GIVEAWAY_DURATION_MS,
   MIN_GIVEAWAY_DURATION_MS,
   chooseRandomEntries,
   formatDurationWords,
+  getGiveawayGameTypeLabel,
+  isMiniGameGiveawayType,
   isGiveawayExpired,
   normalizeEmojiName,
   normalizeGiveawayEndMode,
+  normalizeGiveawayGameType,
   normalizeGiveawayMaxEntries,
   normalizeGiveawayMessageId,
   normalizeGiveawayWinnerCooldownEnabled,

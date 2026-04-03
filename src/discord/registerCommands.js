@@ -13,6 +13,7 @@ const {
   MAX_AUTOPOST_COUNT,
   MIN_AUTOPOST_COUNT
 } = require('../utils/autopost');
+const { GIVEAWAY_GAME_TYPE_CHOICES } = require('../utils/giveaway');
 
 const logger = createLogger({
   level: config.logLevel,
@@ -188,7 +189,7 @@ function buildCommands() {
 
     new SlashCommandBuilder()
       .setName('giveaway')
-      .setDescription('Create and manage simple server giveaways.')
+      .setDescription('Create and manage giveaways and giveaway mini games.')
       .addSubcommand((subcommand) =>
         subcommand
           .setName('status')
@@ -212,6 +213,12 @@ function buildCommands() {
               .setRequired(true)
               .setMinValue(1)
               .setMaxValue(10)
+          )
+          .addStringOption((option) =>
+            option
+              .setName('game_type')
+              .setDescription('Defaults to Standard. Mini-game modes auto-resolve to one winner.')
+              .addChoices(...GIVEAWAY_GAME_TYPE_CHOICES)
           )
           .addStringOption((option) =>
             option

@@ -6,6 +6,7 @@ const {
   ENTRY_MODE_PLACEHOLDER_END_AT,
   GIVEAWAY_END_MODE_TIME,
   normalizeGiveawayEndMode,
+  normalizeGiveawayGameType,
   normalizeGiveawayMaxEntries,
   normalizeGiveawayWinnerCooldownEnabled,
   normalizeGiveawayWinnerCooldownMs
@@ -46,6 +47,7 @@ class GiveawayStore {
         entrant_ids_json TEXT NOT NULL DEFAULT '[]',
         winner_ids_json TEXT NOT NULL DEFAULT '[]',
         end_mode TEXT NOT NULL DEFAULT 'time',
+        game_type TEXT NOT NULL DEFAULT 'standard',
         max_entries INTEGER,
         winner_cooldown_enabled INTEGER NOT NULL DEFAULT 0,
         winner_cooldown_ms INTEGER NOT NULL DEFAULT 180000,
@@ -107,6 +109,7 @@ class GiveawayStore {
     durationMs,
     endAt,
     endMode = GIVEAWAY_END_MODE_TIME,
+    gameType = 'standard',
     maxEntries = null,
     winnerCooldownEnabled = false,
     winnerCooldownMs = DEFAULT_GIVEAWAY_WINNER_COOLDOWN_MS
@@ -127,6 +130,7 @@ class GiveawayStore {
           ? String(endAt)
           : ENTRY_MODE_PLACEHOLDER_END_AT,
       endMode: normalizedEndMode,
+      gameType: normalizeGiveawayGameType(gameType),
       maxEntries: normalizeGiveawayMaxEntries(maxEntries),
       winnerCooldownEnabled: normalizeGiveawayWinnerCooldownEnabled(winnerCooldownEnabled) ? 1 : 0,
       winnerCooldownMs: normalizeGiveawayWinnerCooldownMs(winnerCooldownMs),
@@ -278,6 +282,7 @@ class GiveawayStore {
           entrant_ids_json,
           winner_ids_json,
           end_mode,
+          game_type,
           max_entries,
           winner_cooldown_enabled,
           winner_cooldown_ms,
@@ -297,6 +302,7 @@ class GiveawayStore {
           '[]',
           '[]',
           @endMode,
+          @gameType,
           @maxEntries,
           @winnerCooldownEnabled,
           @winnerCooldownMs,
@@ -320,6 +326,7 @@ class GiveawayStore {
           entrant_ids_json,
           winner_ids_json,
           end_mode,
+          game_type,
           max_entries,
           winner_cooldown_enabled,
           winner_cooldown_ms,
@@ -346,6 +353,7 @@ class GiveawayStore {
           entrant_ids_json,
           winner_ids_json,
           end_mode,
+          game_type,
           max_entries,
           winner_cooldown_enabled,
           winner_cooldown_ms,
@@ -470,6 +478,13 @@ class GiveawayStore {
       `);
     }
 
+    if (!columns.has('game_type')) {
+      this.db.exec(`
+        ALTER TABLE giveaways
+        ADD COLUMN game_type TEXT NOT NULL DEFAULT 'standard'
+      `);
+    }
+
     if (!columns.has('winner_cooldown_enabled')) {
       this.db.exec(`
         ALTER TABLE giveaways
@@ -517,6 +532,7 @@ function mapGiveawayRow(row) {
         ? row.end_at
         : null,
     endMode,
+    gameType: normalizeGiveawayGameType(row.game_type),
     maxEntries: normalizeGiveawayMaxEntries(row.max_entries),
     winnerCooldownEnabled: normalizeGiveawayWinnerCooldownEnabled(
       row.winner_cooldown_enabled

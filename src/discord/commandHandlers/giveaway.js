@@ -9,7 +9,10 @@ const {
   GIVEAWAY_END_MODE_ENTRIES,
   GIVEAWAY_END_MODE_TIME,
   formatDurationWords,
+  getGiveawayGameTypeLabel,
+  isMiniGameGiveawayType,
   normalizeGiveawayEndMode,
+  normalizeGiveawayGameType,
   normalizeGiveawayMaxEntries,
   normalizeGiveawayMessageId,
   parseGiveawayDuration
@@ -61,6 +64,9 @@ async function execute(interaction, context) {
     const winners = interaction.options.getInteger('winners', true);
     const durationInput = interaction.options.getString('duration');
     const maxEntries = normalizeGiveawayMaxEntries(interaction.options.getInteger('max_entries'));
+    const gameType = normalizeGiveawayGameType(
+      interaction.options.getString('game_type')
+    );
     const endMode = resolveRequestedGiveawayEndMode({
       requestedEndMode: interaction.options.getString('end_mode'),
       durationInput,
@@ -74,6 +80,10 @@ async function execute(interaction, context) {
 
     if (!item) {
       throw new Error('Prize text cannot be empty.');
+    }
+
+    if (isMiniGameGiveawayType(gameType) && winners !== 1) {
+      throw new Error('Mini-game giveaways resolve to one winner, so set winners to 1.');
     }
 
     if (endMode === GIVEAWAY_END_MODE_ENTRIES && !Number.isFinite(maxEntries)) {
@@ -93,6 +103,7 @@ async function execute(interaction, context) {
       winnerCount: winners,
       durationMs: duration?.durationMs || 0,
       endMode,
+      gameType,
       maxEntries,
       winnerCooldownEnabled
     });
@@ -102,6 +113,7 @@ async function execute(interaction, context) {
       durationMs: giveaway.durationMs,
       endMode: giveaway.endMode,
       endAt: giveaway.endAt,
+      gameType: giveaway.gameType,
       guildId: giveaway.guildId,
       hostId: giveaway.hostId,
       maxEntries: giveaway.maxEntries,
@@ -224,6 +236,7 @@ function buildGiveawayAdminResultEmbed(title, giveaway, result) {
         'That giveaway was already closed.',
         `Prize: ${giveaway.prizeText}`,
         `Message ID: ${giveaway.messageId}`,
+        `Game: ${getGiveawayGameTypeLabel(giveaway.gameType)}`,
         `Winners: ${formatWinnerMentions(result.winnerIds)}`,
         `Eligible entrants: ${result.entrantCount}`
       ].join('\n')
@@ -243,6 +256,7 @@ function buildGiveawayAdminResultEmbed(title, giveaway, result) {
       [
         `Prize: ${giveaway.prizeText}`,
         `Message ID: ${giveaway.messageId}`,
+        `Game: ${getGiveawayGameTypeLabel(giveaway.gameType)}`,
         'There were no saved eligible entrants available to reroll.'
       ].join('\n')
     );
@@ -254,6 +268,7 @@ function buildGiveawayAdminResultEmbed(title, giveaway, result) {
       [
         `Prize: ${giveaway.prizeText}`,
         `Message ID: ${giveaway.messageId}`,
+        `Game: ${getGiveawayGameTypeLabel(giveaway.gameType)}`,
         'The giveaway was marked ended in storage, but I could not reach the original channel or message to confirm entrants.'
       ].join('\n')
     );
@@ -264,11 +279,13 @@ function buildGiveawayAdminResultEmbed(title, giveaway, result) {
     [
       `Prize: ${giveaway.prizeText}`,
       `Message ID: ${giveaway.messageId}`,
+      `Game: ${getGiveawayGameTypeLabel(giveaway.gameType)}`,
       `Winners: ${formatWinnerMentions(result.winnerIds)}`,
       `Eligible entrants: ${result.entrantCount}`,
+      result.gameResult?.summaryLine ? `Resolution: ${result.gameResult.summaryLine}` : null,
       `Message updated: ${result.messageEdited ? 'Yes' : 'No'}`,
       `Announcement sent: ${result.announcementSent ? 'Yes' : 'No'}`
-    ].join('\n')
+    ].filter(Boolean).join('\n')
   );
 }
 
@@ -311,6 +328,7 @@ function buildGiveawayStartSummary({
   const lines = [
     `Posted in ${channel}.`,
     `Prize: ${giveaway.prizeText}`,
+    `Game: ${getGiveawayGameTypeLabel(giveaway.gameType)}`,
     `Winners: ${giveaway.winnerCount}`,
     giveaway.endMode === GIVEAWAY_END_MODE_ENTRIES
       ? `Mode: Entry target (${giveaway.maxEntries} entries)`

@@ -10,16 +10,17 @@ const {
   GIVEAWAY_EMOJI,
   GIVEAWAY_END_MODE_ENTRIES,
   GIVEAWAY_END_MODE_TIME,
-  chooseRandomEntries,
   formatDurationWords,
   isGiveawayExpired,
   normalizeEmojiName,
   normalizeGiveawayEndMode,
+  normalizeGiveawayGameType,
   normalizeGiveawayMaxEntries,
   normalizeGiveawayMessageId,
   normalizeGiveawayWinnerCooldownEnabled,
   normalizeGiveawayWinnerCooldownMs
 } = require('../utils/giveaway');
+const { resolveGiveawayGame } = require('./giveawayGames');
 
 const EXPIRED_REACTION_NOTICE_COOLDOWN_MS = 10 * 60 * 1000;
 const EXPIRED_REACTION_FALLBACK_DELETE_DELAY_MS = 15_000;
@@ -121,11 +122,13 @@ class GiveawayService {
     winnerCount,
     durationMs = 0,
     endMode = GIVEAWAY_END_MODE_TIME,
+    gameType = 'standard',
     maxEntries = null,
     winnerCooldownEnabled = false,
     winnerCooldownMs = DEFAULT_GIVEAWAY_WINNER_COOLDOWN_MS
   }) {
     const normalizedEndMode = normalizeGiveawayEndMode(endMode);
+    const normalizedGameType = normalizeGiveawayGameType(gameType);
     const normalizedMaxEntries =
       normalizedEndMode === GIVEAWAY_END_MODE_ENTRIES
         ? normalizeGiveawayMaxEntries(maxEntries)
@@ -156,6 +159,7 @@ class GiveawayService {
             endAt,
             status: 'active',
             endMode: normalizedEndMode,
+            gameType: normalizedGameType,
             maxEntries: normalizedMaxEntries,
             winnerCooldownEnabled: normalizedWinnerCooldownEnabled,
             winnerCooldownMs: normalizedWinnerCooldownMs
@@ -179,6 +183,7 @@ class GiveawayService {
         durationMs,
         endAt,
         endMode: normalizedEndMode,
+        gameType: normalizedGameType,
         maxEntries: normalizedMaxEntries,
         winnerCooldownEnabled: normalizedWinnerCooldownEnabled,
         winnerCooldownMs: normalizedWinnerCooldownMs
@@ -186,10 +191,17 @@ class GiveawayService {
 
       await message.react(GIVEAWAY_EMOJI);
       this.scheduleGiveaway(createdGiveaway);
+      this.logger.info('giveaway.game_type', {
+        gameType: createdGiveaway.gameType,
+        guildId: createdGiveaway.guildId,
+        messageId: createdGiveaway.messageId,
+        phase: 'created'
+      });
       this.logger.info('giveaway.created', {
         channelId: createdGiveaway.channelId,
         endMode: createdGiveaway.endMode,
         endAt: createdGiveaway.endAt,
+        gameType: createdGiveaway.gameType,
         guildId: createdGiveaway.guildId,
         hostId: createdGiveaway.hostId,
         maxEntries: createdGiveaway.maxEntries,
@@ -296,6 +308,7 @@ class GiveawayService {
       this.logger.info('giveaway.ended', {
         announcementSent: result.announcementSent,
         entrantCount: result.entrantCount,
+        gameType: result.giveaway.gameType,
         guildId: result.giveaway.guildId,
         initiatedBy,
         messageEdited: result.messageEdited,
@@ -381,11 +394,14 @@ class GiveawayService {
         messageId: normalizedMessageId
       }
     );
-    const winnerIds = chooseRandomEntries(eligibleEntrantIds, giveaway.winnerCount);
+    const gameResult = this.resolveGameResult(giveaway, eligibleEntrantIds, {
+      phase: 'reroll',
+      rerolled: true
+    });
     const rerolledAt = new Date().toISOString();
     const updatedGiveaway = this.giveawayStore.updateGiveawayWinners({
       messageId: normalizedMessageId,
-      winnerIds,
+      winnerIds: gameResult.winnerIds,
       rerolledAt,
       rerolledBy
     });
@@ -399,11 +415,13 @@ class GiveawayService {
     try {
       const { channel, message } = await this.fetchGiveawayMessage(updatedGiveaway);
       messageEdited = await this.safeEditGiveawayMessage(message, updatedGiveaway, {
-        eligibleEntrantCount: eligibleEntrantIds.length
+        eligibleEntrantCount: eligibleEntrantIds.length,
+        gameResult
       });
       announcementSent = await this.safeSendAnnouncement(channel, updatedGiveaway, {
         rerolled: true,
-        eligibleEntrantCount: eligibleEntrantIds.length
+        eligibleEntrantCount: eligibleEntrantIds.length,
+        gameResult
       });
     } catch (error) {
       this.logger.warn('giveaway.reroll_message_update_failed', error, {
@@ -417,6 +435,7 @@ class GiveawayService {
       announcementSent,
       entrantCount: eligibleEntrantIds.length,
       guildId: updatedGiveaway.guildId,
+      gameType: updatedGiveaway.gameType,
       messageEdited,
       messageId: updatedGiveaway.messageId,
       winnerCount: updatedGiveaway.winnerIds.length
@@ -427,7 +446,8 @@ class GiveawayService {
         entrantCount: eligibleEntrantIds.length
       }),
       announcementSent,
-      messageEdited
+      messageEdited,
+      gameResult
     };
   }
 
@@ -684,23 +704,27 @@ class GiveawayService {
           messageId: giveaway.messageId
         })
       : await this.collectEntrantIds(message, giveaway);
-    const winnerIds = chooseRandomEntries(entrantIds, giveaway.winnerCount);
+    const gameResult = this.resolveGameResult(giveaway, entrantIds, {
+      phase: 'end'
+    });
     const endedAt = new Date().toISOString();
     const endedGiveaway = this.giveawayStore.markGiveawayEnded({
       messageId: giveaway.messageId,
       entrantIds,
-      winnerIds,
+      winnerIds: gameResult.winnerIds,
       endedAt
     });
     this.startWinnerCooldowns(endedGiveaway, {
       startedAt: endedAt
     });
     const messageEdited = await this.safeEditGiveawayMessage(message, endedGiveaway, {
-      eligibleEntrantCount: entrantIds.length
+      eligibleEntrantCount: entrantIds.length,
+      gameResult
     });
     const announcementSent = await this.safeSendAnnouncement(channel, endedGiveaway, {
       rerolled: false,
-      eligibleEntrantCount: entrantIds.length
+      eligibleEntrantCount: entrantIds.length,
+      gameResult
     });
 
     return {
@@ -708,7 +732,8 @@ class GiveawayService {
         entrantCount: entrantIds.length
       }),
       announcementSent,
-      messageEdited
+      messageEdited,
+      gameResult
     };
   }
 
@@ -985,7 +1010,8 @@ class GiveawayService {
   }
 
   async safeEditGiveawayMessage(message, giveaway, {
-    eligibleEntrantCount = null
+    eligibleEntrantCount = null,
+    gameResult = null
   } = {}) {
     try {
       await message.edit({
@@ -997,12 +1023,14 @@ class GiveawayService {
             endAt: giveaway.endAt,
             status: giveaway.status,
             endMode: giveaway.endMode,
+            gameType: giveaway.gameType,
             maxEntries: giveaway.maxEntries,
             winnerIds: giveaway.winnerIds,
             entrantCount: giveaway.entrantIds.length,
             eligibleEntrantCount,
             endedAt: giveaway.endedAt,
             rerolledAt: giveaway.rerolledAt,
+            gameSummaryLine: gameResult?.summaryLine || null,
             winnerCooldownEnabled: giveaway.winnerCooldownEnabled,
             winnerCooldownMs: giveaway.winnerCooldownMs
           })
@@ -1022,7 +1050,8 @@ class GiveawayService {
 
   async safeSendAnnouncement(channel, giveaway, {
     rerolled = false,
-    eligibleEntrantCount = null
+    eligibleEntrantCount = null,
+    gameResult = null
   } = {}) {
     let winnerProfiles = [];
 
@@ -1037,6 +1066,8 @@ class GiveawayService {
 
     const content = buildGiveawayAnnouncementContent({
       prizeText: giveaway.prizeText,
+      gameType: giveaway.gameType,
+      gameResult,
       winnerIds: giveaway.winnerIds,
       winnerProfiles,
       entrantCount: giveaway.entrantIds.length,
@@ -1101,6 +1132,58 @@ class GiveawayService {
         winnerCooldownMs: cooldownMs
       });
     }
+  }
+
+  resolveGameResult(giveaway, entrantIds, {
+    phase = 'end',
+    rerolled = false
+  } = {}) {
+    const normalizedEntrantIds = normalizeIdList(entrantIds);
+
+    this.logger.info('giveaway.game_type', {
+      entrantCount: normalizedEntrantIds.length,
+      gameType: giveaway.gameType,
+      guildId: giveaway.guildId,
+      messageId: giveaway.messageId,
+      phase
+    });
+    this.logger.info('giveaway.game_started', {
+      entrantCount: normalizedEntrantIds.length,
+      gameType: giveaway.gameType,
+      guildId: giveaway.guildId,
+      messageId: giveaway.messageId,
+      rerolled
+    });
+
+    const gameResult = resolveGiveawayGame({
+      gameType: giveaway.gameType,
+      entrantIds: normalizedEntrantIds,
+      winnerCount: giveaway.winnerCount
+    });
+
+    this.logger.info('giveaway.game_completed', {
+      entrantCount: normalizedEntrantIds.length,
+      gameType: gameResult.gameType,
+      guildId: giveaway.guildId,
+      messageId: giveaway.messageId,
+      participantCount: gameResult.participantIds.length,
+      rerolled,
+      winnerCount: gameResult.winnerIds.length,
+      winnerIds: gameResult.winnerIds
+    });
+    this.logger.info('giveaway.winner_selection_result', {
+      entrantCount: normalizedEntrantIds.length,
+      gameType: gameResult.gameType,
+      guildId: giveaway.guildId,
+      messageId: giveaway.messageId,
+      participantCount: gameResult.participantIds.length,
+      participantIds: gameResult.participantIds.slice(0, 10),
+      participantIdsTruncated: gameResult.participantIds.length > 10,
+      summaryLine: gameResult.summaryLine,
+      winnerIds: gameResult.winnerIds
+    });
+
+    return gameResult;
   }
 
   async resolveWinnerAnnouncementProfiles(giveaway) {

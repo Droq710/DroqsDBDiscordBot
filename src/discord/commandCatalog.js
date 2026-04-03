@@ -60,7 +60,7 @@ const COMMAND_HELP_ENTRIES = Object.freeze([
   {
     name: '/giveaway start',
     value:
-      'Usage: `/giveaway start item:<text> winners:<1-10> [end_mode:<time|entries>] [duration:<15m|2h|1h15m|1d6h>] [max_entries:<1-500>] [winner_cooldown:<true|false>]`\nCreates a reaction-based giveaway in the current channel. Timed giveaways use `duration`. Entry-target giveaways use `max_entries`. Requires `Manage Server`.'
+      'Usage: `/giveaway start item:<text> winners:<1-10> [game_type:<standard|mini game>] [end_mode:<time|entries>] [duration:<15m|2h|1h15m|1d6h>] [max_entries:<1-500>] [winner_cooldown:<true|false>]`\nCreates a reaction-based giveaway in the current channel. Timed giveaways use `duration`. Entry-target giveaways use `max_entries`. Mini-game giveaways auto-resolve and should use `winners:1`. Requires `Manage Server`.'
   },
   {
     name: '/giveaway end',
