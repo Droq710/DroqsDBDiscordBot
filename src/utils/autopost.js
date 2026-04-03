@@ -248,10 +248,12 @@ function getFlightGroupForRun(run) {
 function buildAutopostSections({
   mode = AUTOPOST_MODES.TOP_N,
   runs = [],
+  guidedRuns = [],
   count = DEFAULT_AUTOPOST_COUNT
 } = {}) {
   const normalizedMode = normalizeAutopostMode(mode);
   const rankedRuns = Array.isArray(runs) ? runs.slice() : [];
+  const rankedGuidedRuns = Array.isArray(guidedRuns) ? guidedRuns.slice() : [];
 
   if (normalizedMode === AUTOPOST_MODES.FLIGHT_GROUPS) {
     return buildFlightSections(rankedRuns, 3);
@@ -263,9 +265,22 @@ function buildAutopostSections({
 
   if (normalizedMode === AUTOPOST_MODES.FULL_BREAKDOWN) {
     return [
-      buildSingleSection('overall', '🔥 Best Overall', rankedRuns.slice(0, 3)),
-      ...buildFlightSections(rankedRuns, 3),
-      ...buildCategorySections(rankedRuns, 3)
+      buildSectionWithGuidedFill({
+        key: 'overall',
+        title: '🔥 Best Overall',
+        runs: rankedRuns,
+        guidedRuns: rankedGuidedRuns,
+        limit: 3,
+        fillWithGuidance: true
+      }),
+      ...buildFlightSections(rankedRuns, 3, {
+        guidedRuns: rankedGuidedRuns,
+        fillWithGuidance: true
+      }),
+      ...buildCategorySections(rankedRuns, 3, {
+        guidedRuns: rankedGuidedRuns,
+        fillWithGuidance: true
+      })
     ];
   }
 
@@ -327,26 +342,69 @@ function buildSingleSection(key, title, runs) {
   };
 }
 
-function buildFlightSections(sortedRuns, limit) {
+function buildFlightSections(sortedRuns, limit, {
+  guidedRuns = [],
+  fillWithGuidance = false
+} = {}) {
   return FLIGHT_GROUPS.map((group) =>
-    buildSingleSection(
-      group.key,
-      group.title,
-      sortedRuns.filter((run) => getFlightGroupForRun(run)?.key === group.key).slice(0, limit)
-    )
+    buildSectionWithGuidedFill({
+      key: group.key,
+      title: group.title,
+      runs: sortedRuns,
+      guidedRuns,
+      limit,
+      fillWithGuidance,
+      predicate: (run) => getFlightGroupForRun(run)?.key === group.key
+    })
   );
 }
 
-function buildCategorySections(sortedRuns, limit) {
+function buildCategorySections(sortedRuns, limit, {
+  guidedRuns = [],
+  fillWithGuidance = false
+} = {}) {
   return CATEGORY_GROUPS.map((group) =>
-    buildSingleSection(
-      group.key,
-      group.title,
-      sortedRuns
-        .filter((run) => getTrackedRunCategory(run?.itemName) === group.key)
-        .slice(0, limit)
-    )
+    buildSectionWithGuidedFill({
+      key: group.key,
+      title: group.title,
+      runs: sortedRuns,
+      guidedRuns,
+      limit,
+      fillWithGuidance,
+      predicate: (run) => getTrackedRunCategory(run?.itemName) === group.key
+    })
   );
+}
+
+function buildSectionWithGuidedFill({
+  key,
+  title,
+  runs,
+  guidedRuns = [],
+  limit,
+  fillWithGuidance = false,
+  predicate = () => true
+}) {
+  const currentSectionRuns = filterSectionRuns(runs, predicate).slice(0, limit);
+
+  if (!fillWithGuidance || currentSectionRuns.length >= limit) {
+    return buildSingleSection(key, title, currentSectionRuns);
+  }
+
+  const usedRunKeys = new Set(currentSectionRuns.map(buildAutopostRunKey));
+  const guidanceSectionRuns = filterSectionRuns(guidedRuns, predicate)
+    .filter((run) => !usedRunKeys.has(buildAutopostRunKey(run)))
+    .slice(0, Math.max(0, limit - currentSectionRuns.length));
+
+  return buildSingleSection(key, title, currentSectionRuns.concat(guidanceSectionRuns));
+}
+
+function filterSectionRuns(runs, predicate) {
+  return (Array.isArray(runs) ? runs : []).filter((run) => predicate(run));
+}
+
+function buildAutopostRunKey(run) {
+  return `${String(run?.itemName || '').trim().toLowerCase()}::${String(run?.country || '').trim().toLowerCase()}`;
 }
 
 module.exports = {

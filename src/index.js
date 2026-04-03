@@ -38,7 +38,8 @@ async function main() {
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
-      GatewayIntentBits.GuildMessageReactions
+      GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.MessageContent
     ],
     partials: [
       Partials.Channel,
@@ -195,6 +196,19 @@ async function main() {
       rootLogger.error('discord.reaction_add_unhandled_error', error, {
         messageId: reaction.message?.id || null,
         userId: user?.id || null
+      });
+    }
+  });
+
+  discordClient.on(Events.MessageCreate, async (message) => {
+    try {
+      await giveawayService.handleHostPrizeConfirmationMessage(message);
+    } catch (error) {
+      rootLogger.error('discord.message_create_unhandled_error', error, {
+        channelId: message.channelId || null,
+        guildId: message.guildId || null,
+        messageId: message.id || null,
+        userId: message.author?.id || null
       });
     }
   });

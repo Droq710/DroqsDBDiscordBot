@@ -249,9 +249,11 @@ class AutopostService {
     }
 
     const runs = payload.runs;
+    const guidedRuns = Array.isArray(payload?.guidedRuns) ? payload.guidedRuns : [];
     const normalizedPayload = {
       ...payload,
-      runs
+      runs,
+      guidedRuns
     };
     const targetCountries = normalizedPayload.countries?.length
       ? normalizedPayload.countries
@@ -260,7 +262,11 @@ class AutopostService {
       ? normalizedPayload.categories
       : activeGuildConfig.categories;
 
-    if (!runs.length) {
+    const hasDisplayableRuns =
+      runs.length > 0 ||
+      (mode === AUTOPOST_MODES.FULL_BREAKDOWN && guidedRuns.length > 0);
+
+    if (!hasDisplayableRuns) {
       this.logger.info('autopost.post_no_runs', {
         ...this.describeGuildConfig(activeGuildConfig),
         ...buildRunLogContext(runContext),
@@ -272,7 +278,7 @@ class AutopostService {
     let embed;
 
     try {
-      embed = runs.length
+      embed = hasDisplayableRuns
         ? this.buildAutopostEmbed({
             mode,
             payload: normalizedPayload,
@@ -314,7 +320,7 @@ class AutopostService {
         ...this.describeGuildConfig(activeGuildConfig),
         ...buildRunLogContext(runContext),
         apiPath: normalizedPayload.apiPath || null,
-        emptyStateKind: runs.length ? null : getEmptyStateKind(normalizedPayload.emptyStateGuidance),
+        emptyStateKind: hasDisplayableRuns ? null : getEmptyStateKind(normalizedPayload.emptyStateGuidance),
         resultCount: runs.length
       });
     } catch (error) {
@@ -322,7 +328,7 @@ class AutopostService {
         ...this.describeGuildConfig(activeGuildConfig),
         ...buildRunLogContext(runContext),
         apiPath: normalizedPayload.apiPath || null,
-        emptyStateKind: runs.length ? null : getEmptyStateKind(normalizedPayload.emptyStateGuidance),
+        emptyStateKind: hasDisplayableRuns ? null : getEmptyStateKind(normalizedPayload.emptyStateGuidance),
         resultCount: runs.length
       });
 
@@ -545,6 +551,7 @@ class AutopostService {
       sections: buildAutopostSections({
         mode,
         runs: payload.runs,
+        guidedRuns: payload.guidedRuns,
         count
       }),
       generatedAt: payload.generatedAt,

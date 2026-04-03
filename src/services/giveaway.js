@@ -1,7 +1,8 @@
 const {
   buildExpiredGiveawayNoticeContent,
   buildGiveawayAnnouncementContent,
-  buildGiveawayEmbed
+  buildGiveawayEmbed,
+  extractTornIdFromText
 } = require('../utils/giveawayFormatters');
 const {
   GIVEAWAY_EMOJI,
@@ -14,6 +15,17 @@ const {
 const EXPIRED_REACTION_NOTICE_COOLDOWN_MS = 10 * 60 * 1000;
 const EXPIRED_REACTION_FALLBACK_DELETE_DELAY_MS = 15_000;
 const GIVEAWAYS_ROLE_NAME = 'Giveaways';
+const RECENT_GIVEAWAY_ANNOUNCEMENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_RECENT_GIVEAWAY_ANNOUNCEMENTS = 50;
+const PRIZE_DELIVERY_FORUM_URL =
+  'https://www.torn.com/forums.php#/p=threads&f=14&t=16551076';
+const PRIZE_CONFIRMATION_PATTERNS = Object.freeze([
+  /\b(?:prize|reward|winnings|payout|payment)\s+(?:was\s+|has\s+been\s+)?sent\b/i,
+  /\bsent\s+(?:the\s+)?(?:prize|reward|winnings|payout|payment|cash|item|trade)\b/i,
+  /\b(?:trade|payout|payment)\s+sent\b/i,
+  /\b(?:prize|reward|winnings|payout|payment)\s+delivered\b/i,
+  /\bpaid\s+out\b/i
+]);
 
 class GiveawayService {
   constructor({
@@ -27,6 +39,7 @@ class GiveawayService {
     this.timers = new Map();
     this.inFlightMessageIds = new Set();
     this.reactionNoticeCooldowns = new Map();
+    this.recentGiveawayAnnouncements = new Map();
     this.started = false;
   }
 
@@ -57,6 +70,7 @@ class GiveawayService {
     this.timers.clear();
     this.inFlightMessageIds.clear();
     this.reactionNoticeCooldowns.clear();
+    this.recentGiveawayAnnouncements.clear();
     this.giveawayStore.close();
     this.started = false;
     this.logger.info('giveaway.scheduler_stopped');
@@ -396,6 +410,42 @@ class GiveawayService {
     );
   }
 
+  async handleHostPrizeConfirmationMessage(message) {
+    if (
+      !message?.guildId ||
+      !message?.channelId ||
+      !message?.author?.id ||
+      message.author.bot
+    ) {
+      return;
+    }
+
+    const content = String(message.content || '').trim();
+
+    if (!content || !isPrizeConfirmationMessage(content)) {
+      return;
+    }
+
+    const announcementContext = this.findRecentGiveawayAnnouncement(message);
+
+    if (!announcementContext) {
+      return;
+    }
+
+    const winnerId = resolveConfirmedWinnerId(message, announcementContext);
+
+    if (!winnerId) {
+      return;
+    }
+
+    const followUpSent = await this.safeSendPrizeDeliveryFollowUp(message, winnerId, announcementContext);
+
+    if (followUpSent) {
+      announcementContext.followUpSent = true;
+      announcementContext.followUpSentAt = Date.now();
+    }
+  }
+
   scheduleGiveaway(giveaway) {
     if (!giveaway?.messageId) {
       return;
@@ -679,9 +729,21 @@ class GiveawayService {
     rerolled = false,
     eligibleEntrantCount = null
   } = {}) {
+    let winnerProfiles = [];
+
+    try {
+      winnerProfiles = await this.resolveWinnerAnnouncementProfiles(giveaway);
+    } catch (error) {
+      this.logger.warn('giveaway.winner_profile_resolution_failed', error, {
+        guildId: giveaway.guildId,
+        messageId: giveaway.messageId
+      });
+    }
+
     const content = buildGiveawayAnnouncementContent({
       prizeText: giveaway.prizeText,
       winnerIds: giveaway.winnerIds,
+      winnerProfiles,
       entrantCount: giveaway.entrantIds.length,
       eligibleEntrantCount,
       winnerCount: giveaway.winnerCount,
@@ -689,12 +751,15 @@ class GiveawayService {
     });
 
     try {
-      await channel.send({
+      const announcementMessage = await channel.send({
         content,
         allowedMentions: {
           parse: [],
           users: giveaway.winnerIds
         }
+      });
+      this.recordRecentGiveawayAnnouncement(giveaway, {
+        announcementMessageId: announcementMessage?.id || null
       });
 
       return true;
@@ -704,6 +769,179 @@ class GiveawayService {
         guildId: giveaway.guildId,
         messageId: giveaway.messageId,
         rerolled
+      });
+      return false;
+    }
+  }
+
+  async resolveWinnerAnnouncementProfiles(giveaway) {
+    const winnerIds = Array.isArray(giveaway?.winnerIds) ? giveaway.winnerIds : [];
+
+    if (!winnerIds.length) {
+      return [];
+    }
+
+    const guild = await this.fetchGuild(giveaway.guildId);
+
+    if (!guild?.members || typeof guild.members.fetch !== 'function') {
+      return [];
+    }
+
+    const profiles = await Promise.all(
+      winnerIds.map((winnerId) =>
+        this.resolveWinnerAnnouncementProfile(guild, winnerId, {
+          guildId: giveaway.guildId,
+          messageId: giveaway.messageId
+        })
+      )
+    );
+
+    return profiles.filter(Boolean);
+  }
+
+  async resolveWinnerAnnouncementProfile(guild, winnerId, {
+    guildId,
+    messageId
+  } = {}) {
+    try {
+      const member = await guild.members.fetch(winnerId);
+      return buildWinnerAnnouncementProfile(member, winnerId);
+    } catch (error) {
+      if (!isUnknownMemberError(error)) {
+        this.logger.warn('giveaway.winner_member_fetch_failed', error, {
+          guildId,
+          messageId,
+          userId: winnerId
+        });
+      }
+
+      return null;
+    }
+  }
+
+  recordRecentGiveawayAnnouncement(giveaway, {
+    announcementMessageId = null
+  } = {}) {
+    if (!giveaway?.messageId) {
+      return;
+    }
+
+    this.pruneRecentGiveawayAnnouncements();
+    this.recentGiveawayAnnouncements.set(giveaway.messageId, {
+      announcementMessageId: announcementMessageId ? String(announcementMessageId) : null,
+      channelId: giveaway.channelId,
+      followUpSent: false,
+      giveawayMessageId: giveaway.messageId,
+      guildId: giveaway.guildId,
+      hostId: giveaway.hostId,
+      prizeText: giveaway.prizeText,
+      recordedAt: Date.now(),
+      winnerIds: Array.isArray(giveaway.winnerIds) ? giveaway.winnerIds.slice() : []
+    });
+    this.trimRecentGiveawayAnnouncements();
+  }
+
+  findRecentGiveawayAnnouncement(message) {
+    this.pruneRecentGiveawayAnnouncements();
+
+    const recentAnnouncements = Array.from(this.recentGiveawayAnnouncements.values()).filter(
+      (announcement) =>
+        announcement.guildId === message.guildId &&
+        announcement.channelId === message.channelId &&
+        announcement.hostId === message.author.id &&
+        announcement.followUpSent !== true &&
+        Array.isArray(announcement.winnerIds) &&
+        announcement.winnerIds.length > 0
+    );
+
+    if (!recentAnnouncements.length) {
+      return null;
+    }
+
+    const referencedMessageId = String(message.reference?.messageId || '').trim() || null;
+
+    if (referencedMessageId) {
+      const referencedAnnouncements = recentAnnouncements.filter(
+        (announcement) =>
+          announcement.announcementMessageId === referencedMessageId ||
+          announcement.giveawayMessageId === referencedMessageId
+      );
+
+      if (referencedAnnouncements.length === 1) {
+        return referencedAnnouncements[0];
+      }
+
+      if (referencedAnnouncements.length > 1) {
+        return null;
+      }
+    }
+
+    const mentionedWinnerIds = getMentionedUserIds(message).filter((winnerId) =>
+      recentAnnouncements.some((announcement) => announcement.winnerIds.includes(winnerId))
+    );
+
+    if (mentionedWinnerIds.length === 1) {
+      const matchingAnnouncements = recentAnnouncements.filter((announcement) =>
+        announcement.winnerIds.includes(mentionedWinnerIds[0])
+      );
+
+      return matchingAnnouncements.length === 1 ? matchingAnnouncements[0] : null;
+    }
+
+    return recentAnnouncements.length === 1 ? recentAnnouncements[0] : null;
+  }
+
+  pruneRecentGiveawayAnnouncements(now = Date.now()) {
+    for (const [messageId, announcement] of this.recentGiveawayAnnouncements.entries()) {
+      if ((announcement.recordedAt || 0) + RECENT_GIVEAWAY_ANNOUNCEMENT_WINDOW_MS <= now) {
+        this.recentGiveawayAnnouncements.delete(messageId);
+      }
+    }
+  }
+
+  trimRecentGiveawayAnnouncements() {
+    if (this.recentGiveawayAnnouncements.size <= MAX_RECENT_GIVEAWAY_ANNOUNCEMENTS) {
+      return;
+    }
+
+    const oldestAnnouncement = Array.from(this.recentGiveawayAnnouncements.entries()).sort(
+      (left, right) => (left[1]?.recordedAt || 0) - (right[1]?.recordedAt || 0)
+    )[0];
+
+    if (oldestAnnouncement) {
+      this.recentGiveawayAnnouncements.delete(oldestAnnouncement[0]);
+    }
+  }
+
+  async safeSendPrizeDeliveryFollowUp(message, winnerId, announcementContext) {
+    const payload = {
+      content:
+        `<@${winnerId}> your prize should be with you now. ` +
+        `When you have a moment, please share your win on the DroqsDB forum: ${PRIZE_DELIVERY_FORUM_URL}`,
+      allowedMentions: {
+        parse: [],
+        repliedUser: false,
+        users: [winnerId]
+      }
+    };
+
+    try {
+      if (typeof message.reply === 'function') {
+        await message.reply(payload);
+      } else if (message.channel?.isTextBased() && typeof message.channel.send === 'function') {
+        await message.channel.send(payload);
+      } else {
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      this.logger.warn('giveaway.prize_delivery_follow_up_failed', error, {
+        channelId: announcementContext.channelId,
+        giveawayMessageId: announcementContext.giveawayMessageId,
+        guildId: announcementContext.guildId,
+        hostId: announcementContext.hostId,
+        winnerId
       });
       return false;
     }
@@ -877,6 +1115,63 @@ function compareGiveawaysByEndAt(left, right) {
   }
 
   return String(left?.messageId || '').localeCompare(String(right?.messageId || ''));
+}
+
+function buildWinnerAnnouncementProfile(member, winnerId) {
+  const tornId = extractTornIdFromMember(member);
+
+  if (!tornId) {
+    return null;
+  }
+
+  return {
+    winnerId: String(winnerId),
+    tornId,
+    profileUrl: buildTornProfileUrl(tornId)
+  };
+}
+
+function extractTornIdFromMember(member) {
+  const candidates = [
+    member?.displayName,
+    member?.nickname,
+    member?.user?.globalName,
+    member?.user?.username
+  ];
+
+  for (const candidate of candidates) {
+    const tornId = extractTornIdFromText(candidate);
+
+    if (tornId) {
+      return tornId;
+    }
+  }
+
+  return null;
+}
+
+function buildTornProfileUrl(tornId) {
+  return `https://www.torn.com/profiles.php?XID=${tornId}`;
+}
+
+function isPrizeConfirmationMessage(content) {
+  return PRIZE_CONFIRMATION_PATTERNS.some((pattern) => pattern.test(content));
+}
+
+function resolveConfirmedWinnerId(message, announcementContext) {
+  const mentionedWinnerIds = getMentionedUserIds(message).filter((winnerId) =>
+    announcementContext.winnerIds.includes(winnerId)
+  );
+
+  if (mentionedWinnerIds.length === 1) {
+    return mentionedWinnerIds[0];
+  }
+
+  return announcementContext.winnerIds.length === 1 ? announcementContext.winnerIds[0] : null;
+}
+
+function getMentionedUserIds(message) {
+  return Array.from(message?.mentions?.users?.keys?.() || []);
 }
 
 function isUnrecoverableDiscordError(error) {

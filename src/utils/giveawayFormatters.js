@@ -6,6 +6,7 @@ const COLORS = Object.freeze({
   success: 0x2ecc71,
   warning: 0xf1c40f
 });
+const TORN_ID_PATTERN = /\[(\d{4,10})\]/;
 
 function joinCompactParts(parts) {
   return parts.filter(Boolean).join(' | ');
@@ -123,6 +124,7 @@ function buildGiveawayEmbed({
 function buildGiveawayAnnouncementContent({
   prizeText,
   winnerIds = [],
+  winnerProfiles = [],
   entrantCount = 0,
   eligibleEntrantCount = null,
   winnerCount = 1,
@@ -144,7 +146,10 @@ function buildGiveawayAnnouncementContent({
       ? ` Only ${formatCount(resolvedEligibleEntrantCount)} eligible ${resolvedEligibleEntrantCount === 1 ? 'passenger remained' : 'passengers remained'}, so all eligible passengers were selected.`
       : '';
 
-  return `${GIVEAWAY_EMOJI} ${statusLabel} for **${safePrizeText}**.\n${winnerLabel}: ${formatWinnerMentions(resolvedWinnerIds)}${shortageNote}`;
+  return `${GIVEAWAY_EMOJI} ${statusLabel} for **${safePrizeText}**.\n${winnerLabel}: ${formatWinnerAnnouncementTargets(
+    resolvedWinnerIds,
+    winnerProfiles
+  )}${shortageNote}`;
 }
 
 function buildGiveawayStatusEmbed({
@@ -210,6 +215,24 @@ function formatWinnerMentions(winnerIds) {
     : 'No winners';
 }
 
+function formatWinnerAnnouncementTargets(winnerIds, winnerProfiles = []) {
+  const resolvedWinnerIds = normalizeIdList(winnerIds);
+  const profileMap = new Map(
+    (Array.isArray(winnerProfiles) ? winnerProfiles : [])
+      .filter((entry) => entry?.winnerId && entry?.profileUrl)
+      .map((entry) => [String(entry.winnerId), entry.profileUrl])
+  );
+
+  return resolvedWinnerIds.length
+    ? resolvedWinnerIds
+        .map((winnerId) => {
+          const profileUrl = profileMap.get(String(winnerId));
+          return profileUrl ? `<@${winnerId}> (${profileUrl})` : `<@${winnerId}>`;
+        })
+        .join(', ')
+    : 'No winners';
+}
+
 function formatGiveawayStatusLine(giveaway) {
   const isClosingNow =
     giveaway.status === 'ending' || isPastTimestamp(giveaway.endAt);
@@ -267,6 +290,11 @@ function sanitizeMentions(value) {
   return String(value || '').replace(/@/g, '@\u200b');
 }
 
+function extractTornIdFromText(value) {
+  const match = String(value || '').match(TORN_ID_PATTERN);
+  return match ? match[1] : null;
+}
+
 function normalizeIdList(value) {
   return Array.from(
     new Set(
@@ -294,5 +322,6 @@ module.exports = {
   buildGiveawayAnnouncementContent,
   buildGiveawayEmbed,
   buildGiveawayStatusEmbed,
+  extractTornIdFromText,
   formatWinnerMentions
 };

@@ -16,6 +16,11 @@ const DEFAULT_COMPANION_TRAVEL_PLANNER_SETTINGS = Object.freeze({
   flightType: 'standard',
   capacity: 29
 });
+const BOT_FIXED_TRAVEL_PLANNER_SETTINGS = Object.freeze({
+  ...DEFAULT_COMPANION_TRAVEL_PLANNER_SETTINGS,
+  flightType: 'private',
+  capacity: 19
+});
 
 function normalizeText(value) {
   return String(value || '')
@@ -307,15 +312,11 @@ class DroqsDbClient {
     };
   }
 
-  async getTravelPlannerDefaultSettings() {
-    try {
-      const meta = await this.getMeta();
-      return normalizeTravelPlannerSettings(meta?.api?.defaultProfitSettings);
-    } catch (error) {
-      return {
-        ...DEFAULT_COMPANION_TRAVEL_PLANNER_SETTINGS
-      };
-    }
+  getBotTravelPlannerSettings(overrides = null) {
+    return normalizeTravelPlannerSettings({
+      ...BOT_FIXED_TRAVEL_PLANNER_SETTINGS,
+      ...(overrides && typeof overrides === 'object' ? overrides : {})
+    });
   }
 
   async queryTravelPlanner({
@@ -327,7 +328,7 @@ class DroqsDbClient {
     settings = null
   } = {}) {
     const requestBody = {
-      settings: normalizeTravelPlannerSettings(settings || (await this.getTravelPlannerDefaultSettings())),
+      settings: this.getBotTravelPlannerSettings(settings),
       filters: {
         roundTripHours: normalizeRoundTripHours(roundTripHours),
         countries: normalizeStringArray(countries),
@@ -361,12 +362,18 @@ class DroqsDbClient {
   async getRunEmptyStateGuidance({
     country = null,
     category = null,
-    itemName = null
+    itemName = null,
+    sellWhere = null
   } = {}) {
     const payload = await this.queryTravelPlanner({
       countries: country ? [country] : [],
       categories: category ? [category] : [],
       itemNames: itemName ? [itemName] : [],
+      settings: sellWhere
+        ? {
+            sellWhere
+          }
+        : null,
       limit: 1
     });
 
@@ -541,34 +548,22 @@ class DroqsDbClient {
       });
     }
 
-    if (sellTarget === 'market') {
-      const payload = await this.getTopRuns();
-
-      return {
-        generatedAt: payload.generatedAt,
-        apiPath: payload.apiPath,
-        sellTarget,
-        emptyStateGuidance: payload.emptyStateGuidance || null,
-        runs: getTopRunsForDisplay(payload).slice(0, normalizeSliceCount(count))
-      };
-    }
-
     try {
-      const settings = await this.getTravelPlannerDefaultSettings();
       const payload = await this.queryTravelPlanner({
         settings: {
-          ...settings,
           sellWhere: sellTarget
         },
-        limit: normalizeTravelPlannerLimit(count, DEFAULT_TRAVEL_PLANNER_RESULT_LIMIT)
+        limit: MAX_TRAVEL_PLANNER_RESULT_LIMIT
       });
+      const runSet = splitRunsForDisplay(payload.runs);
 
       return {
         generatedAt: payload.generatedAt,
         apiPath: payload.apiPath,
         sellTarget,
         emptyStateGuidance: payload.emptyStateGuidance || null,
-        runs: payload.runs.slice(0, normalizeSliceCount(count))
+        runs: runSet.currentRuns.slice(0, normalizeSliceCount(count)),
+        guidedRuns: runSet.guidedRuns.slice(0, normalizeSliceCount(count))
       };
     } catch (error) {
       this.logger.warn('droqsdb.travel_planner.sell_target_fallback', error, {
@@ -576,15 +571,17 @@ class DroqsDbClient {
       });
 
       const payload = await this.getTopRuns();
+      const runSet = splitRunsForDisplay(
+        getTopRunsForDisplay(payload).filter((run) => hasSellTargetPrice(run, sellTarget))
+      );
 
       return {
         generatedAt: payload.generatedAt,
         apiPath: payload.apiPath,
         sellTarget,
         emptyStateGuidance: payload.emptyStateGuidance || null,
-        runs: getTopRunsForDisplay(payload)
-          .filter((run) => hasSellTargetPrice(run, sellTarget))
-          .slice(0, normalizeSliceCount(count))
+        runs: runSet.currentRuns.slice(0, normalizeSliceCount(count)),
+        guidedRuns: runSet.guidedRuns.slice(0, normalizeSliceCount(count))
       };
     }
   }
@@ -604,23 +601,27 @@ class DroqsDbClient {
     let apiPath = payload.apiPath;
     let emptyStateGuidance = payload.emptyStateGuidance || null;
     let currentRuns;
+    let guidedRuns = [];
 
     try {
       const plannerPayload = await this.queryTravelPlanner({
         itemNames: [payload.resolvedItemName],
-        limit: normalizeTravelPlannerLimit(count, 3)
+        limit: MAX_TRAVEL_PLANNER_RESULT_LIMIT
       });
+      const runSet = splitRunsForDisplay(plannerPayload.runs);
 
       generatedAt = plannerPayload.generatedAt || generatedAt;
       apiPath = plannerPayload.apiPath || apiPath;
       emptyStateGuidance = plannerPayload.emptyStateGuidance || emptyStateGuidance;
-      currentRuns = plannerPayload.runs.slice(0, normalizeSliceCount(count));
+      currentRuns = runSet.currentRuns.slice(0, normalizeSliceCount(count));
+      guidedRuns = runSet.guidedRuns.slice(0, normalizeSliceCount(count));
     } catch (error) {
       this.logger.warn('droqsdb.travel_planner.item_fallback', error, {
         itemName: payload.resolvedItemName
       });
 
       currentRuns = buildLegacyCurrentRunsFromItemPayload(payload).slice(0, normalizeSliceCount(count));
+      guidedRuns = [];
     }
 
     const restockableRuns = (payload.item.countries || [])
@@ -633,6 +634,7 @@ class DroqsDbClient {
       item: payload.item,
       emptyStateGuidance,
       currentRuns,
+      guidedRuns,
       restockableRuns
     };
   }
@@ -656,10 +658,9 @@ class DroqsDbClient {
       const payload = await this.queryTravelPlanner({
         countries: filters.countries,
         categories: filters.categories,
-        limit: requestedCount
+        limit: MAX_TRAVEL_PLANNER_RESULT_LIMIT
       });
-
-      return buildRunFilterResult({
+      const result = buildRunFilterResult({
         generatedAt: payload.generatedAt,
         apiPath: payload.apiPath,
         countries: filters.countries,
@@ -667,6 +668,12 @@ class DroqsDbClient {
         emptyStateGuidance: payload.emptyStateGuidance || null,
         runs: payload.runs
       });
+
+      return {
+        ...result,
+        runs: result.runs.slice(0, requestedCount),
+        guidedRuns: result.guidedRuns.slice(0, requestedCount)
+      };
     } catch (error) {
       this.logger.warn('droqsdb.travel_planner.filters_fallback', error, {
         countries: filters.countries,
@@ -677,7 +684,8 @@ class DroqsDbClient {
 
       return {
         ...payload,
-        runs: payload.runs.slice(0, requestedCount)
+        runs: payload.runs.slice(0, requestedCount),
+        guidedRuns: payload.guidedRuns.slice(0, requestedCount)
       };
     }
   }
@@ -958,12 +966,20 @@ function buildRunFilterResult({
   countries = [],
   categories = [],
   emptyStateGuidance = null,
-  runs = []
+  runs = [],
+  guidedRuns = null
 }) {
   const filters = normalizeRunFilterSelections({
     countries,
     categories
   });
+  const normalizedRuns = Array.isArray(runs) ? runs.filter(Boolean) : [];
+  const runSet = Array.isArray(guidedRuns)
+    ? {
+        currentRuns: normalizedRuns,
+        guidedRuns: guidedRuns.filter(Boolean)
+      }
+    : splitRunsForDisplay(normalizedRuns);
 
   return {
     generatedAt,
@@ -973,7 +989,8 @@ function buildRunFilterResult({
     countries: filters.countries,
     categories: filters.categories,
     emptyStateGuidance,
-    runs
+    runs: runSet.currentRuns,
+    guidedRuns: runSet.guidedRuns
   };
 }
 
@@ -1229,9 +1246,75 @@ function isViablePublicRun(run) {
   return normalizeText(run?.availabilityState) === 'in_stock';
 }
 
+function isCurrentDisplayRun(run) {
+  if (run?.isCurrentlyInStock === true) {
+    return true;
+  }
+
+  return Number(run?.stock) > 0 || normalizeText(run?.availabilityState) === 'in_stock';
+}
+
+function isGuidedDepartureRun(run) {
+  if (!run || isCurrentDisplayRun(run)) {
+    return false;
+  }
+
+  if (run?.isProjectedViable === true) {
+    return true;
+  }
+
+  if (normalizeText(run?.availabilityState) === 'projected_on_arrival') {
+    return true;
+  }
+
+  return Number.isFinite(Number(run?.departInMinutes));
+}
+
+function splitRunsForDisplay(runs) {
+  const currentRuns = [];
+  const guidedRuns = [];
+  const seenCurrentRunKeys = new Set();
+  const seenGuidedRunKeys = new Set();
+
+  for (const run of Array.isArray(runs) ? runs : []) {
+    if (!run || typeof run !== 'object') {
+      continue;
+    }
+
+    const runKey = buildRunKey(run);
+
+    if (isCurrentDisplayRun(run)) {
+      if (!seenCurrentRunKeys.has(runKey)) {
+        seenCurrentRunKeys.add(runKey);
+        currentRuns.push(run);
+      }
+
+      continue;
+    }
+
+    if (
+      isGuidedDepartureRun(run) &&
+      !seenCurrentRunKeys.has(runKey) &&
+      !seenGuidedRunKeys.has(runKey)
+    ) {
+      seenGuidedRunKeys.add(runKey);
+      guidedRuns.push(run);
+    }
+  }
+
+  return {
+    currentRuns,
+    guidedRuns: guidedRuns.filter((run) => !seenCurrentRunKeys.has(buildRunKey(run)))
+  };
+}
+
 function toMetric(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
+}
+
+function buildRunKey(run) {
+  return `${normalizeText(run?.itemName)}::${normalizeText(run?.country)}`;
 }
 
 function getTopRunsForDisplay(payload) {
