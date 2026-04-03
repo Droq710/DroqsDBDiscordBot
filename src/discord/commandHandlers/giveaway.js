@@ -1,6 +1,7 @@
 const { PermissionFlagsBits } = require('discord.js');
 const { buildInfoEmbed } = require('../../utils/formatters');
 const {
+  buildGiveawayLeaderboardEmbed,
   buildGiveawayStatusEmbed,
   formatWinnerMentions
 } = require('../../utils/giveawayFormatters');
@@ -30,10 +31,10 @@ async function execute(interaction, context) {
   assertGuildContext(interaction);
 
   const subcommand = interaction.options.getSubcommand();
-  const isPublicStatus = subcommand === 'status';
+  const isPublicView = subcommand === 'status' || subcommand === 'leaderboard';
 
   await interaction.deferReply({
-    ephemeral: !isPublicStatus
+    ephemeral: !isPublicView
   });
 
   if (subcommand === 'status') {
@@ -50,6 +51,28 @@ async function execute(interaction, context) {
         buildGiveawayStatusEmbed({
           guildName: interaction.guild?.name || null,
           giveaways
+        })
+      ]
+    });
+    return;
+  }
+
+  if (subcommand === 'leaderboard') {
+    const leaderboard = context.giveawayService.getLeaderboard(interaction.guildId, {
+      limit: 10
+    });
+
+    context.logger.info('giveaway.leaderboard_requested', {
+      guildId: interaction.guildId,
+      rankedUserCount: leaderboard.length,
+      userId: interaction.user.id
+    });
+
+    await interaction.editReply({
+      embeds: [
+        buildGiveawayLeaderboardEmbed({
+          guildName: interaction.guild?.name || null,
+          entries: leaderboard
         })
       ]
     });

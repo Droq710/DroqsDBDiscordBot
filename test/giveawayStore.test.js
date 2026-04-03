@@ -160,6 +160,250 @@ test('GiveawayStore persists winner cooldowns and keeps the latest expiry', asyn
   );
 });
 
+test('GiveawayStore backfills leaderboard wins from existing ended giveaways', async (t) => {
+  const tempDir = path.join(
+    TEST_TMP_ROOT,
+    `giveaway-store-backfill-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
+  const dbPath = path.join(tempDir, 'giveaways.sqlite');
+
+  await fs.mkdir(tempDir, { recursive: true });
+
+  const legacyDb = new Database(dbPath);
+  legacyDb.exec(`
+    CREATE TABLE giveaways (
+      message_id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      host_id TEXT NOT NULL,
+      prize_text TEXT NOT NULL,
+      winner_count INTEGER NOT NULL,
+      duration_ms INTEGER NOT NULL,
+      end_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      entrant_ids_json TEXT NOT NULL DEFAULT '[]',
+      winner_ids_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      ended_at TEXT,
+      rerolled_at TEXT,
+      rerolled_by TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  legacyDb.prepare(`
+    INSERT INTO giveaways (
+      message_id,
+      guild_id,
+      channel_id,
+      host_id,
+      prize_text,
+      winner_count,
+      duration_ms,
+      end_at,
+      status,
+      entrant_ids_json,
+      winner_ids_json,
+      created_at,
+      ended_at,
+      rerolled_at,
+      updated_at
+    ) VALUES (
+      @messageId,
+      @guildId,
+      @channelId,
+      @hostId,
+      @prizeText,
+      @winnerCount,
+      @durationMs,
+      @endAt,
+      @status,
+      @entrantIdsJson,
+      @winnerIdsJson,
+      @createdAt,
+      @endedAt,
+      @rerolledAt,
+      @updatedAt
+    )
+  `).run({
+    messageId: 'historical-1',
+    guildId: 'guild-1',
+    channelId: 'channel-1',
+    hostId: 'host-1',
+    prizeText: 'Rare Plushie',
+    winnerCount: 1,
+    durationMs: 15 * 60 * 1000,
+    endAt: '2026-04-02T12:15:00.000Z',
+    status: 'ended',
+    entrantIdsJson: '["winner-1","winner-2"]',
+    winnerIdsJson: '["winner-2"]',
+    createdAt: '2026-04-02T12:00:00.000Z',
+    endedAt: '2026-04-02T12:15:00.000Z',
+    rerolledAt: '2026-04-02T12:20:00.000Z',
+    updatedAt: '2026-04-02T12:20:00.000Z'
+  });
+  legacyDb.close();
+
+  const store = new GiveawayStore({
+    databasePath: dbPath,
+    logger: createSilentLogger()
+  });
+  await store.initialize();
+  t.after(async () => {
+    store.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  const leaderboard = store.listGiveawayLeaderboard('guild-1', {
+    limit: 10
+  });
+
+  assert.deepEqual(leaderboard, [
+    {
+      userId: 'winner-2',
+      winCount: 1,
+      firstWinAt: '2026-04-02T12:20:00.000Z',
+      lastWinAt: '2026-04-02T12:20:00.000Z',
+      storedLabel: null
+    }
+  ]);
+});
+
+test('GiveawayStore keeps leaderboard counts aligned with final rerolled winners', async (t) => {
+  const tempDir = path.join(
+    TEST_TMP_ROOT,
+    `giveaway-store-leaderboard-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
+  const dbPath = path.join(tempDir, 'giveaways.sqlite');
+
+  await fs.mkdir(tempDir, { recursive: true });
+
+  const store = new GiveawayStore({
+    databasePath: dbPath,
+    logger: createSilentLogger()
+  });
+  await store.initialize();
+  t.after(async () => {
+    store.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  store.createGiveaway({
+    guildId: 'guild-1',
+    channelId: 'channel-1',
+    messageId: 'message-1',
+    hostId: 'host-1',
+    prizeText: 'Prize One',
+    winnerCount: 1,
+    durationMs: 60_000,
+    endAt: '2026-04-02T12:01:00.000Z'
+  });
+  store.createGiveaway({
+    guildId: 'guild-1',
+    channelId: 'channel-1',
+    messageId: 'message-2',
+    hostId: 'host-1',
+    prizeText: 'Prize Two',
+    winnerCount: 2,
+    durationMs: 60_000,
+    endAt: '2026-04-02T12:06:00.000Z'
+  });
+
+  store.markGiveawayEnded({
+    messageId: 'message-1',
+    entrantIds: ['winner-1', 'winner-3'],
+    winnerIds: ['winner-1'],
+    winnerSnapshots: [
+      {
+        userId: 'winner-1',
+        storedLabel: 'Winner One'
+      }
+    ],
+    endedAt: '2026-04-02T12:01:00.000Z'
+  });
+  store.markGiveawayEnded({
+    messageId: 'message-2',
+    entrantIds: ['winner-1', 'winner-2'],
+    winnerIds: ['winner-1', 'winner-2'],
+    winnerSnapshots: [
+      {
+        userId: 'winner-1',
+        storedLabel: 'Winner One'
+      },
+      {
+        userId: 'winner-2',
+        storedLabel: 'Winner Two'
+      }
+    ],
+    endedAt: '2026-04-02T12:06:00.000Z'
+  });
+
+  let leaderboard = store.listGiveawayLeaderboard('guild-1', {
+    limit: 10
+  });
+
+  assert.deepEqual(
+    leaderboard.map((entry) => ({
+      userId: entry.userId,
+      winCount: entry.winCount,
+      storedLabel: entry.storedLabel
+    })),
+    [
+      {
+        userId: 'winner-1',
+        winCount: 2,
+        storedLabel: 'Winner One'
+      },
+      {
+        userId: 'winner-2',
+        winCount: 1,
+        storedLabel: 'Winner Two'
+      }
+    ]
+  );
+
+  store.updateGiveawayWinners({
+    messageId: 'message-1',
+    winnerIds: ['winner-3'],
+    winnerSnapshots: [
+      {
+        userId: 'winner-3',
+        storedLabel: 'Winner Three'
+      }
+    ],
+    rerolledAt: '2026-04-02T12:10:00.000Z',
+    rerolledBy: 'host-1'
+  });
+
+  leaderboard = store.listGiveawayLeaderboard('guild-1', {
+    limit: 10
+  });
+
+  assert.deepEqual(
+    leaderboard.map((entry) => ({
+      userId: entry.userId,
+      winCount: entry.winCount,
+      storedLabel: entry.storedLabel
+    })),
+    [
+      {
+        userId: 'winner-1',
+        winCount: 1,
+        storedLabel: 'Winner One'
+      },
+      {
+        userId: 'winner-2',
+        winCount: 1,
+        storedLabel: 'Winner Two'
+      },
+      {
+        userId: 'winner-3',
+        winCount: 1,
+        storedLabel: 'Winner Three'
+      }
+    ]
+  );
+});
+
 function createSilentLogger() {
   return {
     info() {},

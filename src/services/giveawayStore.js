@@ -21,6 +21,7 @@ class GiveawayStore {
     this.logger = logger;
     this.db = null;
     this.statements = null;
+    this.transactions = null;
   }
 
   async initialize() {
@@ -68,6 +69,29 @@ class GiveawayStore {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS giveaway_leaderboard_wins (
+        giveaway_message_id TEXT NOT NULL,
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        stored_label TEXT,
+        recorded_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (giveaway_message_id, user_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS giveaway_leaderboard_daily_posts (
+        guild_id TEXT NOT NULL,
+        post_date_utc TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'started',
+        channel_id TEXT,
+        message_id TEXT,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        failure_reason TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (guild_id, post_date_utc)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_giveaways_status_end_at
       ON giveaways (status, end_at);
 
@@ -76,10 +100,17 @@ class GiveawayStore {
 
       CREATE INDEX IF NOT EXISTS idx_giveaway_winner_cooldowns_end_at
       ON giveaway_winner_cooldowns (cooldown_ends_at);
+
+      CREATE INDEX IF NOT EXISTS idx_giveaway_leaderboard_wins_guild_recorded_at
+      ON giveaway_leaderboard_wins (guild_id, recorded_at);
+
+      CREATE INDEX IF NOT EXISTS idx_giveaway_leaderboard_wins_guild_user
+      ON giveaway_leaderboard_wins (guild_id, user_id);
     `);
 
     this.ensureGiveawaySchema();
     this.prepareStatements();
+    this.backfillLeaderboardWins();
     this.pruneExpiredWinnerCooldowns();
     this.logger.info('giveaway_store.initialized', {
       databasePath: this.databasePath
@@ -94,6 +125,7 @@ class GiveawayStore {
     this.db.close();
     this.db = null;
     this.statements = null;
+    this.transactions = null;
     this.logger.info('giveaway_store.closed', {
       databasePath: this.databasePath
     });
@@ -156,6 +188,30 @@ class GiveawayStore {
       .map(mapGiveawayRow);
   }
 
+  listGiveawayLeaderboard(guildId, {
+    limit = 10
+  } = {}) {
+    const normalizedGuildId = String(guildId || '').trim();
+
+    if (!normalizedGuildId) {
+      return [];
+    }
+
+    return this.requireStatements()
+      .selectLeaderboardByGuild.all({
+        guildId: normalizedGuildId,
+        limit: normalizeLeaderboardLimit(limit)
+      })
+      .map(mapLeaderboardRow);
+  }
+
+  listGiveawayLeaderboardGuildIds() {
+    return this.requireStatements()
+      .selectLeaderboardGuildIds.all()
+      .map((row) => String(row.guild_id || '').trim())
+      .filter(Boolean);
+  }
+
   transitionGiveawayStatus({
     messageId,
     fromStatus,
@@ -175,34 +231,48 @@ class GiveawayStore {
     messageId,
     entrantIds = [],
     winnerIds = [],
+    winnerSnapshots = [],
     endedAt = new Date().toISOString()
   }) {
-    this.requireStatements().markEnded.run({
-      messageId: String(messageId),
+    const normalizedMessageId = String(messageId);
+    const normalizedWinnerIds = normalizeIdList(winnerIds);
+    const leaderboardSync = this.requireTransactions().markGiveawayEnded({
+      messageId: normalizedMessageId,
       entrantIdsJson: JSON.stringify(normalizeIdList(entrantIds)),
-      winnerIdsJson: JSON.stringify(normalizeIdList(winnerIds)),
+      winnerIdsJson: JSON.stringify(normalizedWinnerIds),
       endedAt,
-      updatedAt: endedAt
+      updatedAt: endedAt,
+      winnerRecords: buildWinnerRecords(normalizedWinnerIds, winnerSnapshots)
     });
 
-    return this.getGiveawayByMessageId(messageId);
+    return {
+      giveaway: this.getGiveawayByMessageId(normalizedMessageId),
+      leaderboardSync
+    };
   }
 
   updateGiveawayWinners({
     messageId,
     winnerIds = [],
+    winnerSnapshots = [],
     rerolledAt = new Date().toISOString(),
     rerolledBy = null
   }) {
-    this.requireStatements().updateWinners.run({
-      messageId: String(messageId),
-      winnerIdsJson: JSON.stringify(normalizeIdList(winnerIds)),
+    const normalizedMessageId = String(messageId);
+    const normalizedWinnerIds = normalizeIdList(winnerIds);
+    const leaderboardSync = this.requireTransactions().updateGiveawayWinners({
+      messageId: normalizedMessageId,
+      winnerIdsJson: JSON.stringify(normalizedWinnerIds),
       rerolledAt,
       rerolledBy: rerolledBy ? String(rerolledBy) : null,
-      updatedAt: rerolledAt
+      updatedAt: rerolledAt,
+      winnerRecords: buildWinnerRecords(normalizedWinnerIds, winnerSnapshots)
     });
 
-    return this.getGiveawayByMessageId(messageId);
+    return {
+      giveaway: this.getGiveawayByMessageId(normalizedMessageId),
+      leaderboardSync
+    };
   }
 
   updateGiveawayBlockedEntries({
@@ -264,6 +334,72 @@ class GiveawayStore {
     this.db
       .prepare('DELETE FROM giveaway_winner_cooldowns WHERE cooldown_ends_at <= ?')
       .run(now);
+  }
+
+  tryBeginLeaderboardPost({
+    guildId,
+    postDateUtc,
+    channelId = null,
+    startedAt = new Date().toISOString()
+  }) {
+    const result = this.requireStatements().insertLeaderboardDailyPost.run({
+      guildId: String(guildId),
+      postDateUtc: String(postDateUtc),
+      channelId: channelId ? String(channelId) : null,
+      startedAt,
+      updatedAt: startedAt
+    });
+
+    return result.changes > 0;
+  }
+
+  markLeaderboardPostCompleted({
+    guildId,
+    postDateUtc,
+    channelId,
+    messageId,
+    completedAt = new Date().toISOString()
+  }) {
+    this.requireStatements().updateLeaderboardDailyPostCompleted.run({
+      guildId: String(guildId),
+      postDateUtc: String(postDateUtc),
+      channelId: channelId ? String(channelId) : null,
+      messageId: messageId ? String(messageId) : null,
+      completedAt,
+      updatedAt: completedAt
+    });
+  }
+
+  markLeaderboardPostFailed({
+    guildId,
+    postDateUtc,
+    channelId = null,
+    failureReason = null,
+    failedAt = new Date().toISOString()
+  }) {
+    this.requireStatements().updateLeaderboardDailyPostFailed.run({
+      guildId: String(guildId),
+      postDateUtc: String(postDateUtc),
+      channelId: channelId ? String(channelId) : null,
+      failureReason: normalizeFailureReason(failureReason),
+      updatedAt: failedAt
+    });
+  }
+
+  backfillLeaderboardWins() {
+    const endedGiveaways = this.requireStatements().selectEndedGiveawaysForLeaderboardBackfill.all();
+
+    if (!endedGiveaways.length) {
+      return;
+    }
+
+    const synchronizedGiveawayCount = this.requireTransactions().backfillLeaderboardWins(
+      endedGiveaways
+    );
+
+    this.logger.info('giveaway_store.leaderboard_backfilled', {
+      synchronizedGiveawayCount
+    });
   }
 
   prepareStatements() {
@@ -367,6 +503,24 @@ class GiveawayStore {
         WHERE status IN ('active', 'ending')
         ORDER BY end_at ASC, message_id ASC
       `),
+      selectEndedGiveawaysForLeaderboardBackfill: this.db.prepare(`
+        SELECT
+          message_id,
+          guild_id,
+          winner_ids_json,
+          created_at,
+          ended_at,
+          rerolled_at,
+          updated_at
+        FROM giveaways
+        WHERE status = 'ended'
+        ORDER BY updated_at ASC, message_id ASC
+      `),
+      selectGiveawayGuildByMessageId: this.db.prepare(`
+        SELECT guild_id
+        FROM giveaways
+        WHERE message_id = ?
+      `),
       updateStatus: this.db.prepare(`
         UPDATE giveaways
         SET
@@ -455,7 +609,151 @@ class GiveawayStore {
       deleteExpiredWinnerCooldowns: this.db.prepare(`
         DELETE FROM giveaway_winner_cooldowns
         WHERE cooldown_ends_at <= ?
+      `),
+      selectLeaderboardWinsByGiveaway: this.db.prepare(`
+        SELECT
+          giveaway_message_id,
+          guild_id,
+          user_id,
+          stored_label,
+          recorded_at,
+          updated_at
+        FROM giveaway_leaderboard_wins
+        WHERE giveaway_message_id = ?
+        ORDER BY user_id ASC
+      `),
+      upsertLeaderboardWin: this.db.prepare(`
+        INSERT INTO giveaway_leaderboard_wins (
+          giveaway_message_id,
+          guild_id,
+          user_id,
+          stored_label,
+          recorded_at,
+          updated_at
+        ) VALUES (
+          @giveawayMessageId,
+          @guildId,
+          @userId,
+          @storedLabel,
+          @recordedAt,
+          @updatedAt
+        )
+        ON CONFLICT(giveaway_message_id, user_id) DO UPDATE SET
+          guild_id = excluded.guild_id,
+          stored_label = CASE
+            WHEN excluded.stored_label IS NOT NULL AND TRIM(excluded.stored_label) <> ''
+              THEN excluded.stored_label
+            ELSE giveaway_leaderboard_wins.stored_label
+          END,
+          updated_at = excluded.updated_at
+      `),
+      deleteLeaderboardWin: this.db.prepare(`
+        DELETE FROM giveaway_leaderboard_wins
+        WHERE giveaway_message_id = ?
+          AND user_id = ?
+      `),
+      selectLeaderboardByGuild: this.db.prepare(`
+        SELECT
+          wins.user_id,
+          COUNT(*) AS win_count,
+          MIN(wins.recorded_at) AS first_win_at,
+          MAX(wins.updated_at) AS last_win_at,
+          (
+            SELECT inner_wins.stored_label
+            FROM giveaway_leaderboard_wins inner_wins
+            WHERE inner_wins.guild_id = wins.guild_id
+              AND inner_wins.user_id = wins.user_id
+              AND inner_wins.stored_label IS NOT NULL
+              AND TRIM(inner_wins.stored_label) <> ''
+            ORDER BY inner_wins.updated_at DESC, inner_wins.recorded_at DESC
+            LIMIT 1
+          ) AS stored_label
+        FROM giveaway_leaderboard_wins wins
+        WHERE wins.guild_id = @guildId
+        GROUP BY wins.guild_id, wins.user_id
+        ORDER BY win_count DESC, first_win_at ASC, wins.user_id ASC
+        LIMIT @limit
+      `),
+      selectLeaderboardGuildIds: this.db.prepare(`
+        SELECT DISTINCT guild_id
+        FROM giveaway_leaderboard_wins
+        ORDER BY guild_id ASC
+      `),
+      insertLeaderboardDailyPost: this.db.prepare(`
+        INSERT INTO giveaway_leaderboard_daily_posts (
+          guild_id,
+          post_date_utc,
+          status,
+          channel_id,
+          started_at,
+          updated_at
+        ) VALUES (
+          @guildId,
+          @postDateUtc,
+          'started',
+          @channelId,
+          @startedAt,
+          @updatedAt
+        )
+        ON CONFLICT(guild_id, post_date_utc) DO NOTHING
+      `),
+      updateLeaderboardDailyPostCompleted: this.db.prepare(`
+        UPDATE giveaway_leaderboard_daily_posts
+        SET
+          status = 'completed',
+          channel_id = @channelId,
+          message_id = @messageId,
+          completed_at = @completedAt,
+          failure_reason = NULL,
+          updated_at = @updatedAt
+        WHERE guild_id = @guildId
+          AND post_date_utc = @postDateUtc
+      `),
+      updateLeaderboardDailyPostFailed: this.db.prepare(`
+        UPDATE giveaway_leaderboard_daily_posts
+        SET
+          status = 'failed',
+          channel_id = COALESCE(@channelId, channel_id),
+          failure_reason = @failureReason,
+          updated_at = @updatedAt
+        WHERE guild_id = @guildId
+          AND post_date_utc = @postDateUtc
       `)
+    };
+
+    this.transactions = {
+      markGiveawayEnded: this.db.transaction((payload) => {
+        this.statements.markEnded.run(payload);
+
+        return this.syncLeaderboardWinnerRecords({
+          messageId: payload.messageId,
+          guildId: this.lookupGiveawayGuildId(payload.messageId),
+          winnerRecords: payload.winnerRecords,
+          recordedAt: payload.endedAt
+        });
+      }),
+      updateGiveawayWinners: this.db.transaction((payload) => {
+        this.statements.updateWinners.run(payload);
+
+        return this.syncLeaderboardWinnerRecords({
+          messageId: payload.messageId,
+          guildId: this.lookupGiveawayGuildId(payload.messageId),
+          winnerRecords: payload.winnerRecords,
+          recordedAt: payload.rerolledAt
+        });
+      }),
+      backfillLeaderboardWins: this.db.transaction((endedGiveaways) => {
+        for (const giveawayRow of endedGiveaways) {
+          this.syncLeaderboardWinnerRecords({
+            messageId: giveawayRow.message_id,
+            guildId: giveawayRow.guild_id,
+            winnerRecords: buildWinnerRecords(parseJsonIdList(giveawayRow.winner_ids_json)),
+            recordedAt: resolveHistoricalLeaderboardRecordedAt(giveawayRow)
+          });
+        }
+
+        return endedGiveaways.length;
+      })
     };
   }
 
@@ -507,12 +805,75 @@ class GiveawayStore {
     }
   }
 
+  syncLeaderboardWinnerRecords({
+    messageId,
+    guildId,
+    winnerRecords = [],
+    recordedAt = new Date().toISOString()
+  }) {
+    const normalizedMessageId = String(messageId || '').trim();
+    const currentRows = this.statements.selectLeaderboardWinsByGiveaway.all(normalizedMessageId);
+    const normalizedWinnerRecords = normalizeWinnerRecords(winnerRecords);
+    const currentWinnerIdSet = new Set(currentRows.map((row) => row.user_id));
+    const nextWinnerIdSet = new Set(normalizedWinnerRecords.map((row) => row.userId));
+    const resolvedGuildId =
+      String(guildId || '').trim() ||
+      String(currentRows[0]?.guild_id || '').trim() ||
+      null;
+
+    for (const currentRow of currentRows) {
+      if (!nextWinnerIdSet.has(currentRow.user_id)) {
+        this.statements.deleteLeaderboardWin.run(normalizedMessageId, currentRow.user_id);
+      }
+    }
+
+    for (const winnerRecord of normalizedWinnerRecords) {
+      if (!resolvedGuildId) {
+        continue;
+      }
+
+      this.statements.upsertLeaderboardWin.run({
+        giveawayMessageId: normalizedMessageId,
+        guildId: resolvedGuildId,
+        userId: winnerRecord.userId,
+        storedLabel: winnerRecord.storedLabel,
+        recordedAt,
+        updatedAt: recordedAt
+      });
+    }
+
+    return {
+      addedWinnerIds: normalizedWinnerRecords
+        .filter((winnerRecord) => !currentWinnerIdSet.has(winnerRecord.userId))
+        .map((winnerRecord) => winnerRecord.userId),
+      removedWinnerIds: currentRows
+        .filter((currentRow) => !nextWinnerIdSet.has(currentRow.user_id))
+        .map((currentRow) => currentRow.user_id),
+      winnerIds: normalizedWinnerRecords.map((winnerRecord) => winnerRecord.userId)
+    };
+  }
+
+  lookupGiveawayGuildId(messageId) {
+    return (
+      this.statements.selectGiveawayGuildByMessageId.get(String(messageId || '').trim())?.guild_id ||
+      null
+    );
+  }
+
   requireStatements() {
     if (!this.statements) {
       throw new Error('GiveawayStore has not been initialized yet.');
     }
 
     return this.statements;
+  }
+
+  requireTransactions() {
+    if (!this.transactions) {
+      throw new Error('GiveawayStore has not been initialized yet.');
+    }
+
+    return this.transactions;
   }
 }
 
@@ -561,6 +922,16 @@ function mapWinnerCooldownRow(row) {
   };
 }
 
+function mapLeaderboardRow(row) {
+  return {
+    userId: row.user_id,
+    winCount: Math.max(0, Math.floor(Number(row.win_count) || 0)),
+    firstWinAt: row.first_win_at || null,
+    lastWinAt: row.last_win_at || null,
+    storedLabel: normalizeStoredLabel(row.stored_label)
+  };
+}
+
 function parseJsonIdList(value) {
   try {
     const parsed = JSON.parse(value || '[]');
@@ -580,6 +951,87 @@ function normalizeIdList(value) {
         : []
     )
   );
+}
+
+function buildWinnerRecords(winnerIds, winnerSnapshots = []) {
+  const storedLabelByUserId = new Map(
+    (Array.isArray(winnerSnapshots) ? winnerSnapshots : [])
+      .map((entry) => {
+        const userId = String(entry?.userId || '').trim();
+
+        if (!userId) {
+          return null;
+        }
+
+        return [
+          userId,
+          normalizeStoredLabel(entry?.storedLabel || entry?.label || entry?.displayLabel || null)
+        ];
+      })
+      .filter(Boolean)
+  );
+
+  return normalizeIdList(winnerIds).map((userId) => ({
+    userId,
+    storedLabel: storedLabelByUserId.get(userId) || null
+  }));
+}
+
+function normalizeWinnerRecords(value) {
+  const seen = new Set();
+  const normalizedRecords = [];
+
+  for (const entry of Array.isArray(value) ? value : []) {
+    const userId =
+      typeof entry === 'string'
+        ? String(entry).trim()
+        : String(entry?.userId || '').trim();
+
+    if (!userId || seen.has(userId)) {
+      continue;
+    }
+
+    seen.add(userId);
+    normalizedRecords.push({
+      userId,
+      storedLabel:
+        typeof entry === 'string' ? null : normalizeStoredLabel(entry?.storedLabel || null)
+    });
+  }
+
+  return normalizedRecords;
+}
+
+function normalizeStoredLabel(value) {
+  const normalized = String(value || '').trim();
+  return normalized ? normalized.slice(0, 120) : null;
+}
+
+function normalizeFailureReason(value) {
+  const normalized = String(value || '').trim();
+  return normalized ? normalized.slice(0, 500) : null;
+}
+
+function normalizeLeaderboardLimit(value) {
+  const numeric = Math.floor(Number(value) || 10);
+  return Math.min(100, Math.max(1, numeric));
+}
+
+function resolveHistoricalLeaderboardRecordedAt(row) {
+  const candidates = [row?.rerolled_at, row?.ended_at, row?.updated_at, row?.created_at];
+
+  for (const candidate of candidates) {
+    if (isValidIsoTimestamp(candidate)) {
+      return candidate;
+    }
+  }
+
+  return new Date().toISOString();
+}
+
+function isValidIsoTimestamp(value) {
+  const timestamp = Date.parse(value || '');
+  return Number.isFinite(timestamp);
 }
 
 module.exports = {

@@ -5,6 +5,7 @@ const {
   buildGiveawayEntryCooldownNoticeContent,
   buildGiveawayAnnouncementContent,
   buildGiveawayEmbed,
+  buildGiveawayLeaderboardEmbed,
   buildGiveawayStatusEmbed,
   extractTornIdFromText
 } = require('../src/utils/giveawayFormatters');
@@ -92,6 +93,28 @@ test('giveaway status shows entry-target closing rule', () => {
   assert.match(embed.data.description, /50 entry goal/);
   assert.match(embed.data.description, /Coin Flip Battle/);
   assert.match(embed.data.description, /Closes when 50 entries are reached/);
+});
+
+test('giveaway leaderboard embed formats ranked winners cleanly', () => {
+  const embed = buildGiveawayLeaderboardEmbed({
+    guildName: 'DroqsDB',
+    entries: [
+      {
+        userId: '111',
+        displayLabel: 'UserA',
+        winCount: 7
+      },
+      {
+        userId: '222',
+        storedLabel: 'UserB',
+        winCount: 5
+      }
+    ]
+  });
+
+  assert.match(embed.data.description, /All-time giveaway winners in DroqsDB/);
+  assert.match(embed.data.description, /1\. UserA - 7 wins/);
+  assert.match(embed.data.description, /2\. UserB - 5 wins/);
 });
 
 test('mini-game giveaway announcements include the narrated game result', () => {

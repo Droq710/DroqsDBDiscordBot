@@ -57,7 +57,13 @@ const HELP_GROUPS = Object.freeze([
   }),
   Object.freeze({
     title: 'Giveaways',
-    commandNames: ['/giveaway status', '/giveaway start', '/giveaway end', '/giveaway reroll']
+    commandNames: [
+      '/giveaway status',
+      '/giveaway leaderboard',
+      '/giveaway start',
+      '/giveaway end',
+      '/giveaway reroll'
+    ]
   })
 ]);
 

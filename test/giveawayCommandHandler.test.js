@@ -5,6 +5,7 @@ const { execute } = require('../src/discord/commandHandlers/giveaway');
 
 test('giveaway start rejects multiple winners for mini-game modes', async () => {
   const interaction = createInteractionStub({
+    subcommand: 'start',
     strings: {
       item: 'Rare Plushie',
       duration: '15m',
@@ -29,12 +30,43 @@ test('giveaway start rejects multiple winners for mini-game modes', async () => 
   );
 });
 
+test('giveaway leaderboard returns a public leaderboard embed', async () => {
+  const interaction = createInteractionStub({
+    subcommand: 'leaderboard'
+  });
+
+  await execute(interaction, {
+    giveawayService: {
+      getLeaderboard() {
+        return [
+          {
+            userId: 'winner-1',
+            storedLabel: 'Winner One',
+            winCount: 3
+          }
+        ];
+      }
+    },
+    logger: createSilentLogger()
+  });
+
+  assert.deepEqual(interaction.deferredPayload, {
+    ephemeral: false
+  });
+  assert.equal(Array.isArray(interaction.replyPayload?.embeds), true);
+  assert.equal(interaction.replyPayload.embeds[0].data.title, 'Giveaway Leaderboard');
+  assert.match(interaction.replyPayload.embeds[0].data.description, /Winner One - 3 wins/);
+});
+
 function createInteractionStub({
+  subcommand = 'start',
   strings = {},
   integers = {},
   booleans = {}
 } = {}) {
-  return {
+  const interaction = {
+    deferredPayload: null,
+    replyPayload: null,
     guildId: 'guild-1',
     guild: {
       name: 'DroqsDB'
@@ -56,11 +88,15 @@ function createInteractionStub({
     inGuild() {
       return true;
     },
-    async deferReply() {},
-    async editReply() {},
+    async deferReply(payload) {
+      interaction.deferredPayload = payload;
+    },
+    async editReply(payload) {
+      interaction.replyPayload = payload;
+    },
     options: {
       getSubcommand() {
-        return 'start';
+        return subcommand;
       },
       getString(name) {
         return Object.prototype.hasOwnProperty.call(strings, name)
@@ -79,6 +115,8 @@ function createInteractionStub({
       }
     }
   };
+
+  return interaction;
 }
 
 function createSilentLogger() {

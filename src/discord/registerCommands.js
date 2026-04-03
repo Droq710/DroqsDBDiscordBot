@@ -197,6 +197,11 @@ function buildCommands() {
       )
       .addSubcommand((subcommand) =>
         subcommand
+          .setName('leaderboard')
+          .setDescription('Show the all-time giveaway winners for this server.')
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
           .setName('start')
           .setDescription('Start a giveaway in the current channel.')
           .addStringOption((option) =>

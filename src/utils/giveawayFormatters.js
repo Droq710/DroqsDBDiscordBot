@@ -287,6 +287,33 @@ function buildGiveawayStatusEmbed({
   return embed;
 }
 
+function buildGiveawayLeaderboardEmbed({
+  guildName = null,
+  entries = []
+}) {
+  const leaderboardEntries = Array.isArray(entries) ? entries.filter(Boolean) : [];
+  const embed = new EmbedBuilder()
+    .setTitle('Giveaway Leaderboard')
+    .setColor(leaderboardEntries.length ? COLORS.success : COLORS.info);
+
+  if (!leaderboardEntries.length) {
+    embed.setDescription('No giveaway winners recorded yet.');
+    return embed;
+  }
+
+  embed.setDescription(
+    [
+      guildName
+        ? `All-time giveaway winners in ${sanitizeMentions(guildName)}:`
+        : 'All-time giveaway winners:',
+      '',
+      ...leaderboardEntries.map((entry, index) => formatGiveawayLeaderboardLine(entry, index))
+    ].join('\n')
+  );
+
+  return embed;
+}
+
 function buildExpiredGiveawayNoticeContent({
   prizeText,
   guildName = null,
@@ -353,6 +380,17 @@ function formatWinnerAnnouncementTargets(winnerIds, winnerProfiles = []) {
         })
         .join(', ')
     : 'No winners';
+}
+
+function formatGiveawayLeaderboardLine(entry, index) {
+  const resolvedWinCount = normalizeCount(entry?.winCount) || 0;
+  const winLabel = resolvedWinCount === 1 ? 'win' : 'wins';
+  const displayLabel = truncateText(
+    sanitizeMentions(entry?.displayLabel || entry?.storedLabel || `User ${entry?.userId || 'Unknown'}`),
+    80
+  );
+
+  return `${index + 1}. ${displayLabel} - ${formatCount(resolvedWinCount)} ${winLabel}`;
 }
 
 function formatGiveawayStatusLine(giveaway) {
@@ -463,6 +501,7 @@ module.exports = {
   buildExpiredGiveawayNoticeContent,
   buildGiveawayAnnouncementContent,
   buildGiveawayEmbed,
+  buildGiveawayLeaderboardEmbed,
   buildGiveawayStatusEmbed,
   extractTornIdFromText,
   formatWinnerMentions

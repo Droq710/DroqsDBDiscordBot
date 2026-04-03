@@ -1,7 +1,10 @@
+const cron = require('node-cron');
+const { PermissionFlagsBits } = require('discord.js');
 const {
   buildGiveawayEntryCooldownNoticeContent,
   buildExpiredGiveawayNoticeContent,
   buildGiveawayAnnouncementContent,
+  buildGiveawayLeaderboardEmbed,
   buildGiveawayEmbed,
   extractTornIdFromText
 } = require('../utils/giveawayFormatters');
@@ -29,6 +32,10 @@ const RECENT_GIVEAWAY_ANNOUNCEMENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_RECENT_GIVEAWAY_ANNOUNCEMENTS = 50;
 const PRIZE_DELIVERY_FORUM_URL =
   'https://www.torn.com/forums.php#/p=threads&f=14&t=16551076';
+const GIVEAWAY_LEADERBOARD_CRON = '0 23 * * *';
+const GIVEAWAY_LEADERBOARD_TIMEZONE = 'UTC';
+const GIVEAWAY_LEADERBOARD_CHANNEL_NAME = 'giveaways';
+const GIVEAWAY_LEADERBOARD_LIMIT = 10;
 const PRIZE_CONFIRMATION_PATTERNS = Object.freeze([
   /\b(?:prize|reward|winnings|payout|payment)\s+(?:was\s+|has\s+been\s+)?sent\b/i,
   /\bsent\s+(?:the\s+)?(?:prize|reward|winnings|payout|payment|cash|item|trade)\b/i,
@@ -51,6 +58,8 @@ class GiveawayService {
     this.entryCloseSnapshots = new Map();
     this.reactionNoticeCooldowns = new Map();
     this.recentGiveawayAnnouncements = new Map();
+    this.leaderboardJob = null;
+    this.isPostingLeaderboard = false;
     this.started = false;
   }
 
@@ -77,6 +86,8 @@ class GiveawayService {
         .map((giveaway) => this.recoverEntryModeGiveaway(giveaway))
     );
 
+    this.ensureLeaderboardSchedulerRunning();
+
     this.started = true;
     this.logger.info('giveaway.scheduler_started', {
       pendingGiveawayCount: pendingGiveaways.length
@@ -93,6 +104,7 @@ class GiveawayService {
     this.entryCloseSnapshots.clear();
     this.reactionNoticeCooldowns.clear();
     this.recentGiveawayAnnouncements.clear();
+    this.stopLeaderboardScheduler();
     this.giveawayStore.close();
     this.started = false;
     this.logger.info('giveaway.scheduler_stopped');
@@ -100,6 +112,458 @@ class GiveawayService {
 
   getGiveaway(messageId) {
     return this.giveawayStore.getGiveawayByMessageId(messageId);
+  }
+
+  getLeaderboard(guildId, {
+    limit = GIVEAWAY_LEADERBOARD_LIMIT
+  } = {}) {
+    return this.giveawayStore.listGiveawayLeaderboard(guildId, {
+      limit
+    });
+  }
+
+  ensureLeaderboardSchedulerRunning() {
+    if (this.leaderboardJob) {
+      return;
+    }
+
+    this.leaderboardJob = cron.schedule(
+      GIVEAWAY_LEADERBOARD_CRON,
+      async (executionContext) => {
+        await this.postDailyLeaderboard(buildLeaderboardSchedulerRunContext(executionContext));
+      },
+      {
+        name: 'giveaway_leaderboard_daily',
+        timezone: GIVEAWAY_LEADERBOARD_TIMEZONE
+      }
+    );
+
+    this.attachLeaderboardJobListeners();
+    this.logger.info('leaderboard.scheduler_started', {
+      cronExpression: GIVEAWAY_LEADERBOARD_CRON,
+      nextScheduledAt: this.getNextLeaderboardScheduledAt(),
+      timezone: GIVEAWAY_LEADERBOARD_TIMEZONE
+    });
+  }
+
+  stopLeaderboardScheduler() {
+    if (!this.leaderboardJob) {
+      return;
+    }
+
+    this.leaderboardJob.stop();
+
+    if (typeof this.leaderboardJob.destroy === 'function') {
+      this.leaderboardJob.destroy();
+    }
+
+    this.leaderboardJob = null;
+    this.isPostingLeaderboard = false;
+    this.logger.info('leaderboard.scheduler_stopped', {
+      cronExpression: GIVEAWAY_LEADERBOARD_CRON,
+      nextScheduledAt: null,
+      timezone: GIVEAWAY_LEADERBOARD_TIMEZONE
+    });
+  }
+
+  attachLeaderboardJobListeners() {
+    if (!this.leaderboardJob || typeof this.leaderboardJob.on !== 'function') {
+      return;
+    }
+
+    this.leaderboardJob.on('execution:missed', (executionContext) => {
+      this.logger.warn('leaderboard.scheduler_missed_execution', {
+        ...buildLeaderboardRunLogContext(buildLeaderboardSchedulerRunContext(executionContext)),
+        nextScheduledAt: this.getNextLeaderboardScheduledAt()
+      });
+    });
+
+    this.leaderboardJob.on('execution:overlap', (executionContext) => {
+      this.logger.warn('leaderboard.scheduler_overlap', {
+        ...buildLeaderboardRunLogContext(buildLeaderboardSchedulerRunContext(executionContext)),
+        nextScheduledAt: this.getNextLeaderboardScheduledAt()
+      });
+    });
+
+    this.leaderboardJob.on('execution:failed', (executionContext) => {
+      const error =
+        executionContext?.execution?.error ||
+        new Error('Giveaway leaderboard scheduler execution failed.');
+
+      this.logger.error('leaderboard.scheduler_execution_failed', error, {
+        ...buildLeaderboardRunLogContext(buildLeaderboardSchedulerRunContext(executionContext)),
+        nextScheduledAt: this.getNextLeaderboardScheduledAt()
+      });
+    });
+  }
+
+  getNextLeaderboardScheduledAt() {
+    if (!this.leaderboardJob || typeof this.leaderboardJob.getNextRun !== 'function') {
+      return null;
+    }
+
+    return normalizeLogTimestamp(this.leaderboardJob.getNextRun());
+  }
+
+  async postDailyLeaderboard(runContext = {}) {
+    const runLogContext = buildLeaderboardRunLogContext(runContext);
+
+    if (this.isPostingLeaderboard) {
+      this.logger.warn('leaderboard.scheduler_overlap', {
+        ...runLogContext,
+        nextScheduledAt: this.getNextLeaderboardScheduledAt()
+      });
+      return;
+    }
+
+    this.isPostingLeaderboard = true;
+
+    try {
+      const guilds = Array.from(this.discordClient.guilds?.cache?.values?.() || []);
+
+      for (const guild of guilds) {
+        try {
+          await this.postLeaderboardForGuild(guild, runContext);
+        } catch (error) {
+          this.logger.error('leaderboard.post_failed', error, {
+            ...runLogContext,
+            failureStage: 'guild_iteration',
+            guildId: guild?.id || null
+          });
+        }
+      }
+    } finally {
+      this.isPostingLeaderboard = false;
+    }
+  }
+
+  async postLeaderboardForGuild(guild, runContext = {}) {
+    const postDateUtc = resolveLeaderboardPostDateUtc(runContext);
+    const leaderboard = this.getLeaderboard(guild?.id, {
+      limit: GIVEAWAY_LEADERBOARD_LIMIT
+    });
+    const logContext = {
+      ...buildLeaderboardRunLogContext(runContext),
+      channelId: null,
+      entryCount: leaderboard.length,
+      guildId: guild?.id || null,
+      postDateUtc
+    };
+
+    if (!leaderboard.length) {
+      this.logger.info('leaderboard.post_skipped_no_wins', logContext);
+      return;
+    }
+
+    const channel = await this.resolveGiveawayLeaderboardChannel(guild, runContext, {
+      postDateUtc
+    });
+
+    if (!channel) {
+      return;
+    }
+
+    const entries = await this.resolveLeaderboardDisplayEntries(guild, leaderboard, {
+      messageId: null
+    });
+    const startedAt = new Date().toISOString();
+    const claimed = this.giveawayStore.tryBeginLeaderboardPost({
+      guildId: guild.id,
+      postDateUtc,
+      channelId: channel.id,
+      startedAt
+    });
+
+    if (!claimed) {
+      return;
+    }
+
+    this.logger.info('leaderboard.post_started', {
+      ...logContext,
+      channelId: channel.id,
+      entryCount: entries.length
+    });
+
+    try {
+      const message = await channel.send({
+        embeds: [
+          buildGiveawayLeaderboardEmbed({
+            guildName: guild?.name || null,
+            entries
+          })
+        ]
+      });
+
+      this.giveawayStore.markLeaderboardPostCompleted({
+        guildId: guild.id,
+        postDateUtc,
+        channelId: channel.id,
+        messageId: message?.id || null,
+        completedAt: new Date().toISOString()
+      });
+
+      this.logger.info('leaderboard.post_completed', {
+        ...logContext,
+        channelId: channel.id,
+        entryCount: entries.length,
+        messageId: message?.id || null
+      });
+    } catch (error) {
+      this.giveawayStore.markLeaderboardPostFailed({
+        guildId: guild.id,
+        postDateUtc,
+        channelId: channel.id,
+        failureReason: error?.message || 'Failed to send giveaway leaderboard post.',
+        failedAt: new Date().toISOString()
+      });
+      this.logger.error('leaderboard.post_failed', error, {
+        ...logContext,
+        channelId: channel.id,
+        failureStage: 'send'
+      });
+    }
+  }
+
+  async resolveGiveawayLeaderboardChannel(guild, runContext = {}, {
+    postDateUtc = resolveLeaderboardPostDateUtc(runContext)
+  } = {}) {
+    const logContext = {
+      ...buildLeaderboardRunLogContext(runContext),
+      guildId: guild?.id || null,
+      postDateUtc
+    };
+
+    if (!guild?.channels) {
+      this.logger.error(
+        'leaderboard.post_failed',
+        new Error('The guild channel cache is unavailable for the giveaway leaderboard post.'),
+        {
+          ...logContext,
+          failureStage: 'resolve_channel',
+          reason: 'guild_channels_unavailable'
+        }
+      );
+      return null;
+    }
+
+    let channelCollection = guild.channels.cache || null;
+
+    if ((!channelCollection || !channelCollection.size) && typeof guild.channels.fetch === 'function') {
+      try {
+        channelCollection = await guild.channels.fetch();
+      } catch (error) {
+        this.logger.error('leaderboard.post_failed', error, {
+          ...logContext,
+          failureStage: 'resolve_channel',
+          reason: 'channel_fetch_failed'
+        });
+        return null;
+      }
+    }
+
+    const candidates = Array.from(channelCollection?.values?.() || [])
+      .filter(
+        (channel) =>
+          String(channel?.name || '').trim().toLowerCase() === GIVEAWAY_LEADERBOARD_CHANNEL_NAME &&
+          channel?.guildId === guild.id &&
+          channel?.isTextBased?.() === true &&
+          typeof channel?.send === 'function'
+      )
+      .sort((left, right) => String(left?.id || '').localeCompare(String(right?.id || '')));
+    const channel = candidates[0] || null;
+
+    if (!channel) {
+      this.logger.error(
+        'leaderboard.post_failed',
+        new Error('No sendable #giveaways channel is configured for this guild.'),
+        {
+          ...logContext,
+          failureStage: 'resolve_channel',
+          reason: 'channel_not_found'
+        }
+      );
+      return null;
+    }
+
+    const permissions =
+      typeof channel.permissionsFor === 'function' && this.discordClient.user?.id
+        ? channel.permissionsFor(this.discordClient.user.id)
+        : null;
+    const missingPermissions = permissions
+      ? REQUIRED_GIVEAWAY_LEADERBOARD_PERMISSIONS.filter(
+          (permission) => !permissions.has(permission, true)
+        )
+      : REQUIRED_GIVEAWAY_LEADERBOARD_PERMISSIONS.slice();
+
+    if (missingPermissions.length) {
+      this.logger.error(
+        'leaderboard.post_failed',
+        new Error('The configured #giveaways channel is missing required permissions.'),
+        {
+          ...logContext,
+          channelId: channel.id,
+          failureStage: 'resolve_channel',
+          missingPermissions: missingPermissions.map(formatPermissionName)
+        }
+      );
+      return null;
+    }
+
+    return channel;
+  }
+
+  async resolveLeaderboardDisplayEntries(guild, leaderboardEntries, {
+    messageId = null
+  } = {}) {
+    const resolvedEntries = await Promise.all(
+      (Array.isArray(leaderboardEntries) ? leaderboardEntries : []).map(async (entry) => ({
+        ...entry,
+        displayLabel: await this.resolveLeaderboardDisplayLabel(guild, entry, {
+          messageId
+        })
+      }))
+    );
+
+    return resolvedEntries;
+  }
+
+  async resolveLeaderboardDisplayLabel(guild, entry, {
+    messageId = null
+  } = {}) {
+    const memberLabel = await this.resolveGuildMemberLabel(guild, entry?.userId, {
+      logMessage: 'leaderboard.member_fetch_failed',
+      messageId
+    });
+
+    if (memberLabel) {
+      return memberLabel;
+    }
+
+    if (entry?.storedLabel) {
+      return String(entry.storedLabel);
+    }
+
+    const userLabel = await this.resolveGlobalUserLabel(entry?.userId, {
+      logMessage: 'leaderboard.user_fetch_failed',
+      guildId: guild?.id || null,
+      messageId
+    });
+
+    if (userLabel) {
+      return userLabel;
+    }
+
+    return `User ${entry?.userId || 'Unknown'}`;
+  }
+
+  async resolveWinnerIdentitySnapshots(guildId, messageId, winnerIds) {
+    const normalizedWinnerIds = normalizeIdList(winnerIds);
+    const guild = await this.fetchGuild(guildId);
+    const snapshots = await Promise.all(
+      normalizedWinnerIds.map((winnerId) =>
+        this.resolveWinnerIdentitySnapshot(guild, guildId, messageId, winnerId)
+      )
+    );
+
+    return snapshots.filter(Boolean);
+  }
+
+  async resolveWinnerIdentitySnapshot(guild, guildId, messageId, winnerId) {
+    const storedLabel =
+      (await this.resolveGuildMemberLabel(guild, winnerId, {
+        logMessage: 'giveaway.winner_member_fetch_failed',
+        guildId,
+        messageId
+      })) ||
+      (await this.resolveGlobalUserLabel(winnerId, {
+        logMessage: 'giveaway.winner_user_fetch_failed',
+        guildId,
+        messageId
+      })) ||
+      null;
+
+    return {
+      userId: String(winnerId),
+      storedLabel
+    };
+  }
+
+  async resolveGuildMemberLabel(guild, userId, {
+    guildId = guild?.id || null,
+    messageId = null,
+    logMessage = 'giveaway.member_fetch_failed'
+  } = {}) {
+    if (!guild?.members || typeof guild.members.fetch !== 'function' || !userId) {
+      return null;
+    }
+
+    try {
+      const member = await guild.members.fetch(userId);
+      return buildPreferredMemberLabel(member);
+    } catch (error) {
+      if (!isUnknownMemberError(error)) {
+        this.logger.warn(logMessage, error, {
+          guildId,
+          messageId,
+          userId
+        });
+      }
+
+      return null;
+    }
+  }
+
+  async resolveGlobalUserLabel(userId, {
+    guildId = null,
+    messageId = null,
+    logMessage = 'giveaway.user_fetch_failed'
+  } = {}) {
+    if (!userId || !this.discordClient.users || typeof this.discordClient.users.fetch !== 'function') {
+      return null;
+    }
+
+    try {
+      const user = await this.discordClient.users.fetch(userId);
+      return buildPreferredUserLabel(user);
+    } catch (error) {
+      if (!isUnknownMemberError(error)) {
+        this.logger.warn(logMessage, error, {
+          guildId,
+          messageId,
+          userId
+        });
+      }
+
+      return null;
+    }
+  }
+
+  logRecordedLeaderboardWins(giveaway, leaderboardSync, {
+    source = 'end'
+  } = {}) {
+    const addedWinnerIds = Array.isArray(leaderboardSync?.addedWinnerIds)
+      ? leaderboardSync.addedWinnerIds
+      : [];
+
+    if (!giveaway?.guildId || !giveaway?.messageId || !addedWinnerIds.length) {
+      return;
+    }
+
+    const leaderboardCounts = new Map(
+      this.getLeaderboard(giveaway.guildId, {
+        limit: 100
+      }).map((entry) => [entry.userId, entry.winCount])
+    );
+
+    for (const userId of addedWinnerIds) {
+      this.logger.info('leaderboard.win_recorded', {
+        giveawayMessageId: giveaway.messageId,
+        guildId: giveaway.guildId,
+        source,
+        totalWins: leaderboardCounts.has(userId) ? leaderboardCounts.get(userId) : null,
+        userId
+      });
+    }
   }
 
   listActiveGiveawaysByGuild(guildId) {
@@ -322,11 +786,17 @@ class GiveawayService {
 
       if (currentGiveaway?.status === 'ending') {
         if (isUnrecoverableDiscordError(error)) {
-          const endedGiveaway = this.giveawayStore.markGiveawayEnded({
+          const {
+            giveaway: endedGiveaway,
+            leaderboardSync
+          } = this.giveawayStore.markGiveawayEnded({
             messageId: normalizedMessageId,
             entrantIds: currentGiveaway.entrantIds,
             winnerIds: [],
             endedAt: new Date().toISOString()
+          });
+          this.logRecordedLeaderboardWins(endedGiveaway, leaderboardSync, {
+            source: 'forced_end'
           });
           this.clearEntryCloseSnapshot(normalizedMessageId);
 
@@ -399,11 +869,23 @@ class GiveawayService {
       rerolled: true
     });
     const rerolledAt = new Date().toISOString();
-    const updatedGiveaway = this.giveawayStore.updateGiveawayWinners({
+    const winnerSnapshots = await this.resolveWinnerIdentitySnapshots(
+      giveaway.guildId,
+      normalizedMessageId,
+      gameResult.winnerIds
+    );
+    const {
+      giveaway: updatedGiveaway,
+      leaderboardSync
+    } = this.giveawayStore.updateGiveawayWinners({
       messageId: normalizedMessageId,
       winnerIds: gameResult.winnerIds,
+      winnerSnapshots,
       rerolledAt,
       rerolledBy
+    });
+    this.logRecordedLeaderboardWins(updatedGiveaway, leaderboardSync, {
+      source: 'reroll'
     });
     this.startWinnerCooldowns(updatedGiveaway, {
       startedAt: rerolledAt
@@ -708,11 +1190,23 @@ class GiveawayService {
       phase: 'end'
     });
     const endedAt = new Date().toISOString();
-    const endedGiveaway = this.giveawayStore.markGiveawayEnded({
+    const winnerSnapshots = await this.resolveWinnerIdentitySnapshots(
+      giveaway.guildId,
+      giveaway.messageId,
+      gameResult.winnerIds
+    );
+    const {
+      giveaway: endedGiveaway,
+      leaderboardSync
+    } = this.giveawayStore.markGiveawayEnded({
       messageId: giveaway.messageId,
       entrantIds,
       winnerIds: gameResult.winnerIds,
+      winnerSnapshots,
       endedAt
+    });
+    this.logRecordedLeaderboardWins(endedGiveaway, leaderboardSync, {
+      source: 'end'
     });
     this.startWinnerCooldowns(endedGiveaway, {
       startedAt: endedAt
@@ -1556,6 +2050,12 @@ class GiveawayService {
   }
 }
 
+const REQUIRED_GIVEAWAY_LEADERBOARD_PERMISSIONS = Object.freeze([
+  PermissionFlagsBits.ViewChannel,
+  PermissionFlagsBits.SendMessages,
+  PermissionFlagsBits.EmbedLinks
+]);
+
 function buildOutcome(outcome, giveaway, {
   entrantCount = giveaway.entrantIds.length
 } = {}) {
@@ -1565,6 +2065,51 @@ function buildOutcome(outcome, giveaway, {
     entrantCount,
     winnerIds: giveaway.winnerIds
   };
+}
+
+function buildLeaderboardSchedulerRunContext(executionContext = {}) {
+  return {
+    scheduledFor: normalizeLogTimestamp(executionContext.dateLocalIso || executionContext.date),
+    triggeredAt: normalizeLogTimestamp(executionContext.triggeredAt)
+  };
+}
+
+function buildLeaderboardRunLogContext(runContext = {}) {
+  return {
+    scheduledFor: normalizeLogTimestamp(runContext.scheduledFor),
+    triggeredAt: normalizeLogTimestamp(runContext.triggeredAt)
+  };
+}
+
+function resolveLeaderboardPostDateUtc(runContext = {}) {
+  const candidates = [
+    runContext?.scheduledFor,
+    runContext?.triggeredAt,
+    new Date().toISOString()
+  ];
+
+  for (const candidate of candidates) {
+    const timestamp = Date.parse(candidate || '');
+
+    if (Number.isFinite(timestamp)) {
+      return new Date(timestamp).toISOString().slice(0, 10);
+    }
+  }
+
+  return new Date().toISOString().slice(0, 10);
+}
+
+function normalizeLogTimestamp(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
+
+  const normalized = String(value).trim();
+  return normalized || null;
 }
 
 function compareGiveawaysByEndAt(left, right) {
@@ -1584,6 +2129,27 @@ function compareGiveawaysByEndAt(left, right) {
   }
 
   return String(left?.messageId || '').localeCompare(String(right?.messageId || ''));
+}
+
+function buildPreferredMemberLabel(member) {
+  return (
+    normalizeDisplayLabel(member?.displayName) ||
+    normalizeDisplayLabel(member?.nickname) ||
+    buildPreferredUserLabel(member?.user)
+  );
+}
+
+function buildPreferredUserLabel(user) {
+  return (
+    normalizeDisplayLabel(user?.globalName) ||
+    normalizeDisplayLabel(user?.username) ||
+    normalizeDisplayLabel(user?.tag)
+  );
+}
+
+function normalizeDisplayLabel(value) {
+  const normalized = String(value || '').trim();
+  return normalized ? normalized.slice(0, 120) : null;
 }
 
 function buildWinnerAnnouncementProfile(member, winnerId) {
@@ -1685,6 +2251,19 @@ function isExpectedReactionRemovalError(error) {
 
 function isExpectedDmFailure(error) {
   return [50007].includes(Number(error?.code));
+}
+
+function formatPermissionName(permission) {
+  switch (permission) {
+    case PermissionFlagsBits.ViewChannel:
+      return 'ViewChannel';
+    case PermissionFlagsBits.SendMessages:
+      return 'SendMessages';
+    case PermissionFlagsBits.EmbedLinks:
+      return 'EmbedLinks';
+    default:
+      return String(permission);
+  }
 }
 
 module.exports = {
