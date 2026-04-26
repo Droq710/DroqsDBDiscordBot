@@ -38,6 +38,7 @@ const GIVEAWAY_LEADERBOARD_CRON = '0 23 * * *';
 const GIVEAWAY_LEADERBOARD_TIMEZONE = 'UTC';
 const GIVEAWAY_LEADERBOARD_CHANNEL_NAME = 'giveaways';
 const GIVEAWAY_LEADERBOARD_LIMIT = 10;
+const MAX_GIVEAWAY_TIMER_DELAY_MS = 24 * 60 * 60 * 1000;
 const GENERIC_PRIZE_CONFIRMATION_PATTERNS = Object.freeze([
   /\b(?:prize|reward|winnings|payout|payment)\s+(?:was\s+|has\s+been\s+)?sent\b/i,
   /\bsent\s+(?:the\s+)?(?:prize|reward|winnings|payout|payment|cash|item|trade)\b/i,
@@ -1150,7 +1151,19 @@ class GiveawayService {
       giveaway.status === 'ending' || !Number.isFinite(endAtMs)
         ? 0
         : Math.max(0, endAtMs - Date.now());
+    const timerDelayMs = Math.min(delayMs, MAX_GIVEAWAY_TIMER_DELAY_MS);
     const timer = setTimeout(() => {
+      const currentGiveaway = this.giveawayStore.getGiveawayByMessageId(giveaway.messageId);
+
+      if (
+        currentGiveaway?.status === 'active' &&
+        normalizeGiveawayEndMode(currentGiveaway.endMode) === GIVEAWAY_END_MODE_TIME &&
+        !isGiveawayExpired(currentGiveaway)
+      ) {
+        this.scheduleGiveaway(currentGiveaway);
+        return;
+      }
+
       void this.endGiveawayByMessageId(giveaway.messageId, {
         allowResumeEnding: giveaway.status === 'ending',
         initiatedBy: 'system'
@@ -1161,7 +1174,7 @@ class GiveawayService {
           messageId: giveaway.messageId
         });
       });
-    }, delayMs);
+    }, timerDelayMs);
 
     if (typeof timer.unref === 'function') {
       timer.unref();

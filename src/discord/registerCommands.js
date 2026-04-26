@@ -27,6 +27,14 @@ const RUN_SELL_TARGET_CHOICES = Object.freeze([
   { name: 'Bazaar', value: 'bazaar' },
   { name: 'Torn City Shops', value: 'torn' }
 ]);
+const ALERT_MODE_CHOICES = Object.freeze([
+  { name: 'Available Now', value: 'available' },
+  { name: 'Fly Out', value: 'flyout' }
+]);
+const FLIGHT_TYPE_CHOICES = Object.freeze([
+  { name: 'Private', value: 'private' },
+  { name: 'Standard', value: 'standard' }
+]);
 
 function withCountryChoices(option) {
   for (const country of COUNTRY_CHOICES) {
@@ -185,6 +193,73 @@ function buildCommands() {
             .setDescription('Country to inspect.')
             .setRequired(true)
         )
+      ),
+
+    new SlashCommandBuilder()
+      .setName('alert')
+      .setDescription('Create and manage one-shot item/country stock alerts.')
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName('create')
+          .setDescription('Ping you once when an item is available or ready to fly for.')
+          .addStringOption((option) =>
+            withCountryChoices(
+              option
+                .setName('country')
+                .setDescription('Country to watch.')
+                .setRequired(true)
+            )
+          )
+          .addStringOption((option) =>
+            option
+              .setName('item')
+              .setDescription('Item name.')
+              .setRequired(true)
+              .setAutocomplete(true)
+          )
+          .addStringOption((option) =>
+            option
+              .setName('mode')
+              .setDescription('Available now or fly-out timing.')
+              .setRequired(true)
+              .addChoices(...ALERT_MODE_CHOICES)
+          )
+          .addStringOption((option) =>
+            option
+              .setName('flight_type')
+              .setDescription('Fly-out mode only. Defaults to the bot travel profile.')
+              .addChoices(...FLIGHT_TYPE_CHOICES)
+          )
+          .addIntegerOption((option) =>
+            option
+              .setName('capacity')
+              .setDescription('Fly-out mode only. Defaults to the bot travel profile.')
+              .setMinValue(1)
+              .setMaxValue(100)
+          )
+          .addStringOption((option) =>
+            option
+              .setName('note')
+              .setDescription('Optional note for your own reference.')
+              .setMaxLength(200)
+          )
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName('list')
+          .setDescription('Show your active alerts in this server.')
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName('remove')
+          .setDescription('Remove one of your active alerts.')
+          .addIntegerOption((option) =>
+            option
+              .setName('id')
+              .setDescription('Alert ID from /alert list.')
+              .setRequired(true)
+              .setMinValue(1)
+          )
       ),
 
     new SlashCommandBuilder()

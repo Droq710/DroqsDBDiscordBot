@@ -17,7 +17,7 @@ const GIVEAWAY_GAME_TYPE_RISK_RUN = 'risk_run';
 const DEFAULT_GIVEAWAY_WINNER_COOLDOWN_MS = 3 * 60 * 1000;
 const ENTRY_MODE_PLACEHOLDER_END_AT = '9999-12-31T23:59:59.999Z';
 const MIN_GIVEAWAY_DURATION_MS = 60_000;
-const MAX_GIVEAWAY_DURATION_MS = 14 * 24 * 60 * 60 * 1000;
+const MAX_GIVEAWAY_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 const GIVEAWAY_GAME_TYPE_LABELS = Object.freeze({
   [GIVEAWAY_GAME_TYPE_STANDARD]: 'Standard',
   [GIVEAWAY_GAME_TYPE_RUSSIAN_ROULETTE_STANDARD]: 'Russian Roulette',
@@ -92,7 +92,7 @@ function parseGiveawayDuration(value) {
   }
 
   if (durationMs > MAX_GIVEAWAY_DURATION_MS) {
-    throw new Error('Giveaway duration cannot be longer than 14 days.');
+    throw new Error('Giveaway duration cannot be longer than 30 days.');
   }
 
   return {

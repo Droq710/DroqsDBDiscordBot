@@ -40,6 +40,19 @@ const COMMAND_HELP_ENTRIES = Object.freeze([
     value: 'Usage: `/restock item:<item name> country:<country>`\nShows the public restock estimate for one item in one country.'
   },
   {
+    name: '/alert create',
+    value:
+      'Usage: `/alert create country:<country> item:<item name> mode:<available|flyout> [flight_type] [capacity] [note]`\nCreates a one-shot ping in the current channel when DroqsDB shows the item is available or ready to fly for.'
+  },
+  {
+    name: '/alert list',
+    value: 'Usage: `/alert list`\nShows your active alerts in this server.'
+  },
+  {
+    name: '/alert remove',
+    value: 'Usage: `/alert remove id:<alert id>`\nRemoves one of your active alerts.'
+  },
+  {
     name: '/autopost enable',
     value:
       'Usage: `/autopost enable channel:<channel> [count:<1-10>] [mode] [categories:<csv>] [countries:<csv>]`\nTurns on hourly guild autoposts. Modes: Top N, Flight Groups, Category Groups, Full Breakdown. Requires `Manage Server`.'

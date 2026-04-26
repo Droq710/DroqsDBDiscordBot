@@ -19,6 +19,7 @@ const config = {
   apiCacheTtlMs: parsePositiveInteger(process.env.API_CACHE_TTL_MS, 30_000),
   apiCacheStaleTtlMs: parsePositiveInteger(process.env.API_CACHE_STALE_TTL_MS, 120_000),
   droqsdbApiTimeoutMs: parsePositiveInteger(process.env.DROQSDB_API_TIMEOUT_MS, 30_000),
+  alertCheckIntervalMs: parsePositiveInteger(process.env.ALERT_CHECK_INTERVAL_MS, 5 * 60 * 1000),
   commandUserRateLimitWindowMs: parsePositiveInteger(
     process.env.COMMAND_USER_RATE_LIMIT_WINDOW_MS,
     10_000

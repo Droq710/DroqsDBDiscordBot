@@ -2,6 +2,8 @@ const { Client, Events, GatewayIntentBits, Partials } = require('discord.js');
 const { DroqsDbClient } = require('./api/droqsdbClient');
 const { assertBotConfig, config } = require('./config');
 const { handleAutocomplete, handleChatInputCommand } = require('./discord/commandHandlers');
+const { AlertService } = require('./services/alertService');
+const { AlertStore } = require('./services/alertStore');
 const { AutopostService } = require('./services/autopost');
 const { TTLCache } = require('./services/cache');
 const { GiveawayService } = require('./services/giveaway');
@@ -74,6 +76,12 @@ async function main() {
       component: 'giveaway_store'
     })
   });
+  const alertStore = new AlertStore({
+    databasePath: config.autopostDbFile,
+    logger: rootLogger.child({
+      component: 'alert_store'
+    })
+  });
 
   const autopostService = new AutopostService({
     discordClient,
@@ -92,6 +100,15 @@ async function main() {
       component: 'giveaway'
     })
   });
+  const alertService = new AlertService({
+    discordClient,
+    droqsdbClient,
+    alertStore,
+    checkIntervalMs: config.alertCheckIntervalMs,
+    logger: rootLogger.child({
+      component: 'alerts'
+    })
+  });
 
   const rateLimiter = new CommandRateLimiter({
     userWindowMs: config.commandUserRateLimitWindowMs,
@@ -105,11 +122,13 @@ async function main() {
 
   await guildConfigStore.initialize();
   await giveawayStore.initialize();
+  await alertStore.initialize();
 
   const health = await runStartupHealthCheck({
     droqsdbClient,
     guildConfigStore,
     giveawayStore,
+    alertStore,
     logger
   });
 
@@ -118,6 +137,8 @@ async function main() {
     autopostCron: config.autopostCron,
     autopostDatabasePath: config.autopostDbFile,
     autopostTimezone: config.autopostTimezone,
+    alertCheckIntervalMs: config.alertCheckIntervalMs,
+    activeAlerts: health.activeAlerts,
     commandGuildRateLimitMax: config.commandGuildRateLimitMax,
     commandGuildRateLimitWindowMs: config.commandGuildRateLimitWindowMs,
     commandUserRateLimitMax: config.commandUserRateLimitMax,
@@ -135,6 +156,7 @@ async function main() {
     config,
     droqsdbClient,
     autopostService,
+    alertService,
     giveawayService,
     logger: rootLogger.child({
       component: 'commands'
@@ -165,6 +187,15 @@ async function main() {
       });
     } catch (error) {
       logger.error('startup.giveaway_start_failed', error);
+    }
+
+    try {
+      await alertService.start();
+      logger.info('startup.ready', {
+        alertScheduler: 'started'
+      });
+    } catch (error) {
+      logger.error('startup.alerts_start_failed', error);
     }
   });
 
@@ -250,6 +281,12 @@ async function main() {
     }
 
     try {
+      alertService.stop();
+    } catch (error) {
+      logger.error('shutdown.alerts_stop_failed', error);
+    }
+
+    try {
       discordClient.destroy();
     } catch (error) {
       logger.error('shutdown.discord_destroy_failed', error);
@@ -289,6 +326,7 @@ async function runStartupHealthCheck({
   droqsdbClient,
   guildConfigStore,
   giveawayStore,
+  alertStore,
   logger
 }) {
   let droqsdbStatus = 'degraded';
@@ -306,6 +344,7 @@ async function runStartupHealthCheck({
     droqsdbStatus,
     enabledAutopostGuilds: guildConfigStore.listEnabledGuildConfigs().length,
     pendingGiveaways: giveawayStore.listPendingGiveaways().length,
+    activeAlerts: alertStore.listActiveAlerts().length,
     generatedAt
   };
 }

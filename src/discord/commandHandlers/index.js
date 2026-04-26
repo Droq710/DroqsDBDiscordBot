@@ -1,3 +1,4 @@
+const alert = require('./alert');
 const autopost = require('./autopost');
 const giveaway = require('./giveaway');
 const help = require('./help');
@@ -17,6 +18,7 @@ const {
 } = require('../../utils/formatters');
 
 const handlers = Object.freeze({
+  alert,
   autopost,
   giveaway,
   help,
