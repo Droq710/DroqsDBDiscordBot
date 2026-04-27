@@ -1,6 +1,9 @@
 const {
   ALERT_MODE_AVAILABLE,
-  ALERT_MODE_FLYOUT
+  ALERT_MODE_FLYOUT,
+  ALERT_REPEAT_EVERY_TIME,
+  normalizeAlertConditionState,
+  normalizeAlertRepeatMode
 } = require('./alertStore');
 
 const DEFAULT_ALERT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
@@ -89,20 +92,26 @@ class AlertService {
       for (const alert of alerts) {
         try {
           const result = await this.evaluateAlert(alert, cache);
-          this.alertStore.markAlertChecked({
-            id: alert.id
-          });
+          const evaluatedAt = new Date().toISOString();
+          const shouldNotify = this.shouldNotifyAlert(alert, result);
+          this.recordAlertConditionState(alert, result, evaluatedAt);
 
-          if (!result.shouldNotify) {
+          if (!shouldNotify) {
             continue;
           }
 
           const sent = await this.sendAlertNotification(alert, result);
 
           if (sent) {
-            this.alertStore.markAlertTriggered({
-              id: alert.id
-            });
+            if (normalizeAlertRepeatMode(alert.repeatMode) === ALERT_REPEAT_EVERY_TIME) {
+              this.alertStore.markAlertNotified({
+                id: alert.id
+              });
+            } else {
+              this.alertStore.markAlertTriggered({
+                id: alert.id
+              });
+            }
             triggeredCount += 1;
           }
         } catch (error) {
@@ -134,12 +143,48 @@ class AlertService {
     return this.evaluateAvailableAlert(alert, cache);
   }
 
+  shouldNotifyAlert(alert, result) {
+    if (result?.shouldNotify !== true) {
+      return false;
+    }
+
+    if (normalizeAlertRepeatMode(alert.repeatMode) !== ALERT_REPEAT_EVERY_TIME) {
+      return true;
+    }
+
+    return normalizeAlertConditionState(alert.lastConditionState) !== true;
+  }
+
+  recordAlertConditionState(alert, result, evaluatedAt = new Date().toISOString()) {
+    const conditionActive = result?.conditionActive === true || result?.shouldNotify === true;
+    const previousConditionState = normalizeAlertConditionState(alert.lastConditionState);
+    const conditionChangedAt =
+      previousConditionState === conditionActive ? null : evaluatedAt;
+
+    if (typeof this.alertStore.markAlertConditionState === 'function') {
+      this.alertStore.markAlertConditionState({
+        id: alert.id,
+        conditionState: conditionActive,
+        checkedAt: evaluatedAt,
+        conditionChangedAt
+      });
+      return;
+    }
+
+    this.alertStore.markAlertChecked({
+      id: alert.id,
+      checkedAt: evaluatedAt
+    });
+  }
+
   async evaluateAvailableAlert(alert, cache) {
     const snapshot = await this.getItemCountrySnapshotCached(alert, cache);
     const stock = Number(snapshot.countryRow?.stock);
+    const isAvailable = Number.isFinite(stock) && stock > 0;
 
     return {
-      shouldNotify: Number.isFinite(stock) && stock > 0,
+      conditionActive: isAvailable,
+      shouldNotify: isAvailable,
       message: buildAvailableAlertMessage(alert, snapshot),
       snapshot
     };
@@ -151,6 +196,7 @@ class AlertService {
 
     if (!run) {
       return {
+        conditionActive: false,
         shouldNotify: false,
         message: null,
         planner
@@ -166,6 +212,7 @@ class AlertService {
     const shouldNotify = isCurrentlyInStock || (isProjectedViable && departInMinutes !== null && departInMinutes <= 0);
 
     return {
+      conditionActive: shouldNotify,
       shouldNotify,
       message: buildFlyoutAlertMessage(alert, run),
       planner,

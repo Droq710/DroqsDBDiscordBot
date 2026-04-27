@@ -37,7 +37,77 @@ test('alert create stores an alert', async () => {
   assert.equal(createdPayload.itemName, 'Xanax');
   assert.equal(createdPayload.country, 'Mexico');
   assert.equal(createdPayload.mode, 'available');
+  assert.equal(createdPayload.repeatMode, 'once');
   assert.match(interaction.replyPayload.embeds[0].data.description, /ID: 7/);
+  assert.match(interaction.replyPayload.embeds[0].data.description, /Repeat: Once/);
+});
+
+test('alert create stores explicit one-time repeat mode', async () => {
+  let createdPayload = null;
+  const interaction = createInteractionStub({
+    subcommand: 'create',
+    strings: {
+      item: 'xanax',
+      country: 'mexico',
+      mode: 'available',
+      repeat: 'once'
+    }
+  });
+
+  await execute(interaction, {
+    alertService: {
+      countActiveAlertsForUser() {
+        return 0;
+      },
+      createAlert(payload) {
+        createdPayload = payload;
+        return {
+          id: 8,
+          ...payload
+        };
+      }
+    },
+    droqsdbClient: createDroqsdbClientStub(),
+    logger: createSilentLogger()
+  });
+
+  assert.equal(createdPayload.repeatMode, 'once');
+  assert.equal(createdPayload.lastConditionState, null);
+});
+
+test('alert create stores recurring repeat mode', async () => {
+  let createdPayload = null;
+  const interaction = createInteractionStub({
+    subcommand: 'create',
+    strings: {
+      item: 'xanax',
+      country: 'mexico',
+      mode: 'available',
+      repeat: 'every_time'
+    }
+  });
+
+  await execute(interaction, {
+    alertService: {
+      countActiveAlertsForUser() {
+        return 0;
+      },
+      createAlert(payload) {
+        createdPayload = payload;
+        return {
+          id: 9,
+          ...payload
+        };
+      }
+    },
+    droqsdbClient: createDroqsdbClientStub(),
+    logger: createSilentLogger()
+  });
+
+  assert.equal(createdPayload.repeatMode, 'every_time');
+  assert.equal(createdPayload.lastConditionState, false);
+  assert.match(interaction.replyPayload.embeds[0].data.description, /Repeat: Every time/);
+  assert.match(interaction.replyPayload.embeds[0].data.description, /every time it comes back in stock/);
 });
 
 test('alert list shows user alerts', async () => {
@@ -52,6 +122,7 @@ test('alert list shows user alerts', async () => {
           {
             id: 4,
             mode: 'available',
+            repeatMode: 'every_time',
             itemName: 'Xanax',
             country: 'Mexico'
           }
@@ -61,7 +132,7 @@ test('alert list shows user alerts', async () => {
     logger: createSilentLogger()
   });
 
-  assert.match(interaction.replyPayload.embeds[0].data.description, /#4 - Available now - Xanax in Mexico/);
+  assert.match(interaction.replyPayload.embeds[0].data.description, /#4 - Xanax \/ Mexico - Available - Every time/);
 });
 
 test('alert remove disables the requested alert', async () => {

@@ -42,7 +42,7 @@ const COMMAND_HELP_ENTRIES = Object.freeze([
   {
     name: '/alert create',
     value:
-      'Usage: `/alert create country:<country> item:<item name> mode:<available|flyout> [flight_type] [capacity] [note]`\nCreates a one-shot ping in the current channel when DroqsDB shows the item is available or ready to fly for.'
+      'Usage: `/alert create country:<country> item:<item name> mode:<available|flyout> [repeat:<once|every_time>] [flight_type] [capacity] [note]`\nCreates a one-time or recurring ping in the current channel when DroqsDB shows the item is available or ready to fly for.'
   },
   {
     name: '/alert list',

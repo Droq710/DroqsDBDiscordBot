@@ -31,6 +31,10 @@ const ALERT_MODE_CHOICES = Object.freeze([
   { name: 'Available Now', value: 'available' },
   { name: 'Fly Out', value: 'flyout' }
 ]);
+const ALERT_REPEAT_CHOICES = Object.freeze([
+  { name: 'One-time ping', value: 'once' },
+  { name: 'Every time', value: 'every_time' }
+]);
 const FLIGHT_TYPE_CHOICES = Object.freeze([
   { name: 'Private', value: 'private' },
   { name: 'Standard', value: 'standard' }
@@ -197,11 +201,11 @@ function buildCommands() {
 
     new SlashCommandBuilder()
       .setName('alert')
-      .setDescription('Create and manage one-shot item/country stock alerts.')
+      .setDescription('Create and manage item/country stock alerts.')
       .addSubcommand((subcommand) =>
         subcommand
           .setName('create')
-          .setDescription('Ping you once when an item is available or ready to fly for.')
+          .setDescription('Ping you when an item is available or ready to fly for.')
           .addStringOption((option) =>
             withCountryChoices(
               option
@@ -223,6 +227,12 @@ function buildCommands() {
               .setDescription('Available now or fly-out timing.')
               .setRequired(true)
               .addChoices(...ALERT_MODE_CHOICES)
+          )
+          .addStringOption((option) =>
+            option
+              .setName('repeat')
+              .setDescription('Defaults to one-time. Choose every time for transition-based recurring pings.')
+              .addChoices(...ALERT_REPEAT_CHOICES)
           )
           .addStringOption((option) =>
             option

@@ -1106,28 +1106,45 @@ class GiveawayService {
     }
 
     const content = String(message.content || '').trim();
-    const prizeConfirmation = parsePrizeConfirmationMessage(content);
+    const prizeConfirmations = parsePrizeConfirmationMessages(content);
 
-    if (!content || !prizeConfirmation) {
+    if (!content || !prizeConfirmations.length) {
       return;
     }
 
-    const announcementContext = this.findRecentGiveawayAnnouncement(message, prizeConfirmation);
+    const announcementContext = this.findRecentGiveawayAnnouncement(message, prizeConfirmations);
 
     if (!announcementContext) {
       return;
     }
 
-    const winnerId = resolveConfirmedWinnerId(message, announcementContext, prizeConfirmation);
+    const winnerIds = resolveConfirmedWinnerIds(message, announcementContext, prizeConfirmations);
 
-    if (!winnerId) {
+    if (!winnerIds.length) {
       return;
     }
 
-    const followUpSent = await this.safeSendPrizeDeliveryFollowUp(message, winnerId, announcementContext);
+    const unmatchedRecipients = collectUnmatchedPrizeConfirmationRecipients(
+      announcementContext,
+      prizeConfirmations
+    );
+    const followUpSent = await this.safeSendPrizeDeliveryFollowUp(
+      message,
+      winnerIds,
+      announcementContext,
+      {
+        unmatchedRecipients
+      }
+    );
 
     if (followUpSent) {
-      announcementContext.followUpSent = true;
+      announcementContext.followUpWinnerIds = normalizeIdList([
+        ...(announcementContext.followUpWinnerIds || []),
+        ...winnerIds
+      ]);
+      announcementContext.followUpSent = announcementContext.winnerIds.every((winnerId) =>
+        announcementContext.followUpWinnerIds.includes(winnerId)
+      );
       announcementContext.followUpSentAt = Date.now();
     }
   }
@@ -1903,6 +1920,7 @@ class GiveawayService {
       announcementMessageId: announcementMessageId ? String(announcementMessageId) : null,
       channelId: giveaway.channelId,
       followUpSent: false,
+      followUpWinnerIds: [],
       giveawayMessageId: giveaway.messageId,
       guildId: giveaway.guildId,
       hostId: giveaway.hostId,
@@ -1914,9 +1932,10 @@ class GiveawayService {
     this.trimRecentGiveawayAnnouncements();
   }
 
-  findRecentGiveawayAnnouncement(message, prizeConfirmation = null) {
+  findRecentGiveawayAnnouncement(message, prizeConfirmations = []) {
     this.pruneRecentGiveawayAnnouncements();
 
+    const confirmations = normalizePrizeConfirmations(prizeConfirmations);
     const recentAnnouncements = Array.from(this.recentGiveawayAnnouncements.values()).filter(
       (announcement) =>
         announcement.guildId === message.guildId &&
@@ -1953,17 +1972,17 @@ class GiveawayService {
       recentAnnouncements.some((announcement) => announcement.winnerIds.includes(winnerId))
     );
 
-    if (mentionedWinnerIds.length === 1) {
+    if (mentionedWinnerIds.length > 0) {
       const matchingAnnouncements = recentAnnouncements.filter((announcement) =>
-        announcement.winnerIds.includes(mentionedWinnerIds[0])
+        mentionedWinnerIds.every((winnerId) => announcement.winnerIds.includes(winnerId))
       );
 
       return matchingAnnouncements.length === 1 ? matchingAnnouncements[0] : null;
     }
 
-    if (prizeConfirmation) {
+    if (confirmations.length) {
       const matchingAnnouncements = recentAnnouncements.filter((announcement) =>
-        announcementMatchesPrizeConfirmation(announcement, prizeConfirmation)
+        announcementMatchesPrizeConfirmations(announcement, confirmations)
       );
 
       if (matchingAnnouncements.length === 1) {
@@ -1974,7 +1993,7 @@ class GiveawayService {
         return null;
       }
 
-      if (hasPrizeConfirmationRecipient(prizeConfirmation)) {
+      if (confirmations.some(hasPrizeConfirmationRecipient)) {
         return null;
       }
     }
@@ -2004,15 +2023,39 @@ class GiveawayService {
     }
   }
 
-  async safeSendPrizeDeliveryFollowUp(message, winnerId, announcementContext) {
+  async safeSendPrizeDeliveryFollowUp(
+    message,
+    winnerIds,
+    announcementContext,
+    {
+      unmatchedRecipients = []
+    } = {}
+  ) {
+    const resolvedWinnerIds = normalizeIdList(winnerIds);
+
+    if (!resolvedWinnerIds.length) {
+      return false;
+    }
+
+    const contentLines = [
+      `Congrats ${formatNaturalList(resolvedWinnerIds.map((winnerId) => `<@${winnerId}>`))}, your ${
+        resolvedWinnerIds.length === 1 ? 'prize' : 'prizes'
+      } should be with you now. When you have a moment, please share your win on the DroqsDB forum: ${this.prizeDeliveryForumUrl}`
+    ];
+    const unmatchedRecipientLabels = normalizePrizeConfirmationRecipientLabels(unmatchedRecipients);
+
+    if (unmatchedRecipientLabels.length) {
+      contentLines.push(
+        `I could not match the other send-log recipient(s) to this giveaway: ${unmatchedRecipientLabels.join(', ')}.`
+      );
+    }
+
     const payload = {
-      content:
-        `Congrats <@${winnerId}>, your prize should be with you now. ` +
-        `When you have a moment, please share your win on the DroqsDB forum: ${this.prizeDeliveryForumUrl}`,
+      content: contentLines.join('\n'),
       allowedMentions: {
         parse: [],
         repliedUser: false,
-        users: [winnerId]
+        users: resolvedWinnerIds
       }
     };
 
@@ -2032,7 +2075,7 @@ class GiveawayService {
         giveawayMessageId: announcementContext.giveawayMessageId,
         guildId: announcementContext.guildId,
         hostId: announcementContext.hostId,
-        winnerId
+        winnerIds: resolvedWinnerIds
       });
       return false;
     }
@@ -2487,6 +2530,56 @@ function parsePrizeConfirmationMessage(content) {
   return null;
 }
 
+function parsePrizeConfirmationMessages(content) {
+  const rawContent = String(content || '').trim();
+
+  if (!rawContent) {
+    return [];
+  }
+
+  const lineConfirmations = splitPrizeConfirmationCandidateLines(rawContent)
+    .map((line) => parsePrizeConfirmationMessage(line))
+    .filter(Boolean);
+
+  if (lineConfirmations.length) {
+    return dedupePrizeConfirmations(lineConfirmations);
+  }
+
+  const singleConfirmation = parsePrizeConfirmationMessage(rawContent);
+  return singleConfirmation ? [singleConfirmation] : [];
+}
+
+function splitPrizeConfirmationCandidateLines(content) {
+  return String(content || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function dedupePrizeConfirmations(prizeConfirmations) {
+  const seen = new Set();
+  const deduped = [];
+
+  for (const prizeConfirmation of normalizePrizeConfirmations(prizeConfirmations)) {
+    const key = [
+      prizeConfirmation.type,
+      canonicalizeWinnerMatchText(prizeConfirmation.recipientText),
+      prizeConfirmation.recipientTornId || '',
+      canonicalizeWinnerMatchText(prizeConfirmation.valueText),
+      canonicalizeWinnerMatchText(prizeConfirmation.messageText)
+    ].join(':');
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(prizeConfirmation);
+  }
+
+  return deduped;
+}
+
 function normalizePrizeConfirmationContent(content) {
   let normalized = String(content || '').trim();
 
@@ -2519,23 +2612,61 @@ function stripWrappingPair(value, startToken, endToken) {
   return normalized.slice(startToken.length, normalized.length - endToken.length).trim();
 }
 
-function announcementMatchesPrizeConfirmation(announcement, prizeConfirmation) {
-  return normalizeWinnerReferences(announcement?.winnerReferences).some((winnerReference) =>
-    winnerReferenceMatchesPrizeConfirmation(winnerReference, prizeConfirmation)
+function announcementMatchesPrizeConfirmations(announcement, prizeConfirmations) {
+  return normalizePrizeConfirmations(prizeConfirmations).some(
+    (prizeConfirmation) =>
+      announcementMatchesPrizeConfirmation(announcement, prizeConfirmation) ||
+      (
+        !hasPrizeConfirmationRecipient(prizeConfirmation) &&
+        resolveWinnerIdsMentionedInPrizeConfirmation(announcement, prizeConfirmation).length > 0
+      )
   );
+}
+
+function announcementMatchesPrizeConfirmation(announcement, prizeConfirmation) {
+  return resolveWinnerIdsForPrizeConfirmation(announcement, prizeConfirmation).length > 0;
 }
 
 function hasPrizeConfirmationRecipient(prizeConfirmation) {
   return Boolean(prizeConfirmation?.recipientTornId || prizeConfirmation?.recipientText);
 }
 
-function resolveConfirmedWinnerId(message, announcementContext, prizeConfirmation = null) {
+function resolveConfirmedWinnerIds(message, announcementContext, prizeConfirmations = []) {
   const mentionedWinnerIds = getMentionedUserIds(message).filter((winnerId) =>
     announcementContext.winnerIds.includes(winnerId)
   );
+  const matchedWinnerIds = normalizePrizeConfirmations(prizeConfirmations)
+    .flatMap((prizeConfirmation) =>
+      resolveWinnerIdsForPrizeConfirmation(announcementContext, prizeConfirmation)
+    );
+  const nameMatchedWinnerIds = normalizePrizeConfirmations(prizeConfirmations)
+    .filter((prizeConfirmation) => !hasPrizeConfirmationRecipient(prizeConfirmation))
+    .flatMap((prizeConfirmation) =>
+      resolveWinnerIdsMentionedInPrizeConfirmation(announcementContext, prizeConfirmation)
+    );
+  const fallbackWinnerIds =
+    !mentionedWinnerIds.length &&
+    !matchedWinnerIds.length &&
+    !nameMatchedWinnerIds.length &&
+    announcementContext.winnerIds.length === 1 &&
+    normalizePrizeConfirmations(prizeConfirmations).some(
+      (prizeConfirmation) => !hasPrizeConfirmationRecipient(prizeConfirmation)
+    )
+      ? [announcementContext.winnerIds[0]]
+      : [];
+  const alreadyFollowedWinnerIds = new Set(normalizeIdList(announcementContext.followUpWinnerIds));
 
-  if (mentionedWinnerIds.length === 1) {
-    return mentionedWinnerIds[0];
+  return normalizeIdList([
+    ...mentionedWinnerIds,
+    ...matchedWinnerIds,
+    ...nameMatchedWinnerIds,
+    ...fallbackWinnerIds
+  ]).filter((winnerId) => !alreadyFollowedWinnerIds.has(winnerId));
+}
+
+function resolveWinnerIdsForPrizeConfirmation(announcementContext, prizeConfirmation = null) {
+  if (!prizeConfirmation) {
+    return [];
   }
 
   const matchedWinnerIds = normalizeWinnerReferences(announcementContext?.winnerReferences)
@@ -2545,11 +2676,53 @@ function resolveConfirmedWinnerId(message, announcementContext, prizeConfirmatio
     )
     .map((winnerReference) => winnerReference.winnerId);
 
-  if (matchedWinnerIds.length === 1) {
-    return matchedWinnerIds[0];
+  return matchedWinnerIds.length === 1 ? matchedWinnerIds : [];
+}
+
+function resolveWinnerIdsMentionedInPrizeConfirmation(announcementContext, prizeConfirmation = null) {
+  const contentKey = canonicalizeWinnerMatchText(prizeConfirmation?.rawContent);
+
+  if (!contentKey) {
+    return [];
   }
 
-  return announcementContext.winnerIds.length === 1 ? announcementContext.winnerIds[0] : null;
+  return normalizeWinnerReferences(announcementContext?.winnerReferences)
+    .filter(
+      (winnerReference) =>
+        announcementContext.winnerIds.includes(winnerReference.winnerId) &&
+        winnerReference.aliases.some((alias) => {
+          const aliasKey = canonicalizeWinnerMatchText(alias);
+          return aliasKey.length >= 3 && contentKey.includes(aliasKey);
+        })
+    )
+    .map((winnerReference) => winnerReference.winnerId);
+}
+
+function collectUnmatchedPrizeConfirmationRecipients(announcementContext, prizeConfirmations = []) {
+  const unmatchedRecipients = [];
+  const seen = new Set();
+
+  for (const prizeConfirmation of normalizePrizeConfirmations(prizeConfirmations)) {
+    if (!hasPrizeConfirmationRecipient(prizeConfirmation)) {
+      continue;
+    }
+
+    if (resolveWinnerIdsForPrizeConfirmation(announcementContext, prizeConfirmation).length > 0) {
+      continue;
+    }
+
+    const label = formatPrizeConfirmationRecipient(prizeConfirmation);
+    const key = canonicalizeWinnerMatchText(label);
+
+    if (!label || seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    unmatchedRecipients.push(label);
+  }
+
+  return unmatchedRecipients;
 }
 
 function winnerReferenceMatchesPrizeConfirmation(winnerReference, prizeConfirmation) {
@@ -2631,6 +2804,61 @@ function canonicalizeWinnerMatchText(value) {
     .replace(/\[\d{4,10}\]/g, ' ')
     .replace(/\(\d{4,10}\)/g, ' ')
     .replace(/[^a-z0-9]+/g, '');
+}
+
+function normalizePrizeConfirmations(value) {
+  if (!value) {
+    return [];
+  }
+
+  return (Array.isArray(value) ? value : [value]).filter(Boolean);
+}
+
+function formatPrizeConfirmationRecipient(prizeConfirmation) {
+  return (
+    normalizeDisplayLabel(prizeConfirmation?.recipientText) ||
+    (prizeConfirmation?.recipientTornId ? `Torn ID ${prizeConfirmation.recipientTornId}` : null)
+  );
+}
+
+function normalizePrizeConfirmationRecipientLabels(values) {
+  const labels = [];
+  const seen = new Set();
+
+  for (const value of Array.isArray(values) ? values : []) {
+    const normalized = normalizeDisplayLabel(value);
+
+    if (!normalized) {
+      continue;
+    }
+
+    const key = canonicalizeWinnerMatchText(normalized);
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    labels.push(sanitizePlainTextForDiscord(normalized));
+  }
+
+  return labels;
+}
+
+function sanitizePlainTextForDiscord(value) {
+  return String(value || '').replace(/@/g, '@\u200b').trim();
+}
+
+function formatNaturalList(values) {
+  const normalizedValues = Array.isArray(values)
+    ? values.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+
+  if (normalizedValues.length <= 2) {
+    return normalizedValues.join(' and ');
+  }
+
+  return `${normalizedValues.slice(0, -1).join(', ')}, and ${normalizedValues[normalizedValues.length - 1]}`;
 }
 
 function formatWinnerAnnouncementTargets(winnerIds, winnerProfiles = []) {

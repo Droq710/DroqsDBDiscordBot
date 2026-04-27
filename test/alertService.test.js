@@ -40,6 +40,97 @@ test('AlertService triggers available-now alerts once', async () => {
   assert.equal(store.alerts[0].status, 'triggered');
 });
 
+test('AlertService recurring available alerts fire on unavailable to available transitions', async () => {
+  const sentMessages = [];
+  const store = createMemoryAlertStore([
+    {
+      id: 1,
+      guildId: 'guild-1',
+      channelId: 'channel-1',
+      userId: 'user-1',
+      itemName: 'Xanax',
+      country: 'Mexico',
+      mode: 'available',
+      repeatMode: 'every_time',
+      lastConditionState: false,
+      status: 'active'
+    }
+  ]);
+  const stocks = [5, 5, 0, 7];
+  const service = new AlertService({
+    discordClient: createDiscordClient(sentMessages),
+    droqsdbClient: {
+      async getItemCountrySnapshot() {
+        return {
+          countryRow: {
+            stock: stocks.shift()
+          }
+        };
+      }
+    },
+    alertStore: store,
+    logger: createSilentLogger()
+  });
+
+  await service.runOnce();
+  await service.runOnce();
+  await service.runOnce();
+  await service.runOnce();
+
+  assert.equal(sentMessages.length, 2);
+  assert.equal(store.alerts[0].status, 'active');
+  assert.equal(store.alerts[0].triggeredAt, undefined);
+  assert.equal(store.alerts[0].lastConditionState, true);
+  assert.ok(store.alerts[0].lastNotifiedAt);
+});
+
+test('AlertService recurring fly-out alerts fire once while ready', async () => {
+  const sentMessages = [];
+  const store = createMemoryAlertStore([
+    {
+      id: 1,
+      guildId: 'guild-1',
+      channelId: 'channel-1',
+      userId: 'user-1',
+      itemName: 'Xanax',
+      country: 'Mexico',
+      mode: 'flyout',
+      repeatMode: 'every_time',
+      lastConditionState: false,
+      status: 'active'
+    }
+  ]);
+  const service = new AlertService({
+    discordClient: createDiscordClient(sentMessages),
+    droqsdbClient: {
+      async queryTravelPlanner() {
+        return {
+          runs: [
+            {
+              itemName: 'Xanax',
+              country: 'Mexico',
+              stock: 0,
+              availabilityState: 'projected_on_arrival',
+              isProjectedViable: true,
+              departInMinutes: 0
+            }
+          ]
+        };
+      }
+    },
+    alertStore: store,
+    logger: createSilentLogger()
+  });
+
+  await service.runOnce();
+  await service.runOnce();
+
+  assert.equal(sentMessages.length, 1);
+  assert.match(sentMessages[0].content, /Fly-out alert: Leave for Mexico now/);
+  assert.equal(store.alerts[0].status, 'active');
+  assert.equal(store.alerts[0].lastConditionState, true);
+});
+
 test('AlertService handles API failure without disabling an alert', async () => {
   const store = createMemoryAlertStore([
     {
@@ -68,6 +159,39 @@ test('AlertService handles API failure without disabling an alert', async () => 
 
   assert.equal(store.alerts[0].status, 'active');
   assert.equal(store.alerts[0].triggeredAt, undefined);
+});
+
+test('AlertService API failure preserves recurring condition state', async () => {
+  const store = createMemoryAlertStore([
+    {
+      id: 1,
+      guildId: 'guild-1',
+      channelId: 'channel-1',
+      userId: 'user-1',
+      itemName: 'Xanax',
+      country: 'Mexico',
+      mode: 'available',
+      repeatMode: 'every_time',
+      lastConditionState: false,
+      status: 'active'
+    }
+  ]);
+  const service = new AlertService({
+    discordClient: createDiscordClient([]),
+    droqsdbClient: {
+      async getItemCountrySnapshot() {
+        throw new Error('API down');
+      }
+    },
+    alertStore: store,
+    logger: createSilentLogger()
+  });
+
+  await service.runOnce();
+
+  assert.equal(store.alerts[0].status, 'active');
+  assert.equal(store.alerts[0].lastConditionState, false);
+  assert.equal(store.alerts[0].lastCheckedAt, undefined);
 });
 
 test('AlertService fly-out alerts use the DroqsDB travel planner', async () => {
@@ -136,6 +260,27 @@ function createMemoryAlertStore(alerts) {
     markAlertChecked({ id }) {
       const alert = this.alerts.find((entry) => entry.id === id);
       alert.lastCheckedAt = new Date().toISOString();
+    },
+    markAlertConditionState({
+      id,
+      conditionState,
+      checkedAt = new Date().toISOString(),
+      conditionChangedAt = null
+    }) {
+      const alert = this.alerts.find((entry) => entry.id === id);
+      alert.lastCheckedAt = checkedAt;
+      alert.lastConditionState = conditionState;
+
+      if (conditionChangedAt) {
+        alert.lastConditionChangedAt = conditionChangedAt;
+      }
+    },
+    markAlertNotified({
+      id,
+      notifiedAt = new Date().toISOString()
+    }) {
+      const alert = this.alerts.find((entry) => entry.id === id);
+      alert.lastNotifiedAt = notifiedAt;
     },
     markAlertTriggered({ id }) {
       const alert = this.alerts.find((entry) => entry.id === id);

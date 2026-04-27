@@ -251,6 +251,228 @@ test('GiveawayService recognizes Torn sent lines with timestamps and prompts the
   assert.equal(service.recentGiveawayAnnouncements.get(giveaway.messageId)?.followUpSent, true);
 });
 
+test('GiveawayService recognizes multi-line prize confirmations for two winners', async () => {
+  const giveaway = createGiveawayRecord({
+    hostId: 'host-1',
+    status: 'ended',
+    winnerIds: ['winner-1', 'winner-2']
+  });
+  const replies = [];
+  const service = new GiveawayService({
+    discordClient: createDiscordClientStub(),
+    giveawayStore: {},
+    logger: createSilentLogger(),
+    prizeDeliveryForumUrl: 'https://example.com/forum-thread'
+  });
+
+  service.recordRecentGiveawayAnnouncement(giveaway, {
+    announcementMessageId: 'announcement-1',
+    winnerReferences: [
+      {
+        winnerId: 'winner-1',
+        aliases: ['Glenn-Rhee [1111111]']
+      },
+      {
+        winnerId: 'winner-2',
+        aliases: ['Shekels [2222222]']
+      }
+    ]
+  });
+
+  await service.handleHostPrizeConfirmationMessage(
+    createPrizeConfirmationMessage({
+      giveaway,
+      replies,
+      content:
+        '23:30:25 - 26/04/26 You sent $1,000,000 to Glenn-Rhee with the message: DroqsDB Discord Winner!\n' +
+        '23:30:43 - 26/04/26 You sent $1,000,000 to Shekels with the message: DroqsDB Discord Winner!'
+    })
+  );
+
+  assert.equal(replies.length, 1);
+  assert.match(replies[0].content, /Congrats <@winner-1> and <@winner-2>/);
+  assert.match(replies[0].content, /your prizes should be with you now/);
+  assert.deepEqual(replies[0].allowedMentions.users, ['winner-1', 'winner-2']);
+  assert.equal(service.recentGiveawayAnnouncements.get(giveaway.messageId)?.followUpSent, true);
+});
+
+test('GiveawayService recognizes multiple winner names in a generic confirmation', async () => {
+  const giveaway = createGiveawayRecord({
+    hostId: 'host-1',
+    status: 'ended',
+    winnerIds: ['winner-1', 'winner-2']
+  });
+  const replies = [];
+  const service = new GiveawayService({
+    discordClient: createDiscordClientStub(),
+    giveawayStore: {},
+    logger: createSilentLogger()
+  });
+
+  service.recordRecentGiveawayAnnouncement(giveaway, {
+    winnerReferences: [
+      {
+        winnerId: 'winner-1',
+        aliases: ['Glenn-Rhee']
+      },
+      {
+        winnerId: 'winner-2',
+        aliases: ['Shekels']
+      }
+    ]
+  });
+
+  await service.handleHostPrizeConfirmationMessage(
+    createPrizeConfirmationMessage({
+      giveaway,
+      replies,
+      content: 'Payout sent to Glenn-Rhee and Shekels.'
+    })
+  );
+
+  assert.equal(replies.length, 1);
+  assert.match(replies[0].content, /Congrats <@winner-1> and <@winner-2>/);
+  assert.deepEqual(replies[0].allowedMentions.users, ['winner-1', 'winner-2']);
+});
+
+test('GiveawayService formats three or more recognized prize winners naturally', async () => {
+  const giveaway = createGiveawayRecord({
+    hostId: 'host-1',
+    status: 'ended',
+    winnerIds: ['winner-1', 'winner-2', 'winner-3']
+  });
+  const replies = [];
+  const service = new GiveawayService({
+    discordClient: createDiscordClientStub(),
+    giveawayStore: {},
+    logger: createSilentLogger()
+  });
+
+  service.recordRecentGiveawayAnnouncement(giveaway, {
+    announcementMessageId: 'announcement-1',
+    winnerReferences: [
+      {
+        winnerId: 'winner-1',
+        aliases: ['Glenn-Rhee [1111111]']
+      },
+      {
+        winnerId: 'winner-2',
+        aliases: ['Winner With Spaces [2222222]'],
+        tornId: '2222222'
+      },
+      {
+        winnerId: 'winner-3',
+        aliases: ['Pilot [Fast] [3333333]'],
+        tornId: '3333333'
+      }
+    ]
+  });
+
+  await service.handleHostPrizeConfirmationMessage(
+    createPrizeConfirmationMessage({
+      giveaway,
+      replies,
+      content:
+        '23:30:25 - 26/04/26 You sent $1,000,000 to Glenn-Rhee with the message: DroqsDB Discord Winner!\n' +
+        '23:30:43 - 26/04/26 You sent $1,000,000 to Winner With Spaces [2222222] with the message: DroqsDB Discord Winner!\n' +
+        '23:31:12 - 26/04/26 You sent $1,000,000 to Pilot [Fast] [3333333] with the message: DroqsDB Discord Winner!'
+    })
+  );
+
+  assert.equal(replies.length, 1);
+  assert.match(replies[0].content, /Congrats <@winner-1>, <@winner-2>, and <@winner-3>/);
+  assert.deepEqual(replies[0].allowedMentions.users, ['winner-1', 'winner-2', 'winner-3']);
+});
+
+test('GiveawayService does not duplicate pings for repeated send-log entries', async () => {
+  const giveaway = createGiveawayRecord({
+    hostId: 'host-1',
+    status: 'ended',
+    winnerIds: ['winner-1', 'winner-2']
+  });
+  const replies = [];
+  const service = new GiveawayService({
+    discordClient: createDiscordClientStub(),
+    giveawayStore: {},
+    logger: createSilentLogger()
+  });
+
+  service.recordRecentGiveawayAnnouncement(giveaway, {
+    winnerReferences: [
+      {
+        winnerId: 'winner-1',
+        aliases: ['Glenn-Rhee']
+      },
+      {
+        winnerId: 'winner-2',
+        aliases: ['Shekels']
+      }
+    ]
+  });
+
+  await service.handleHostPrizeConfirmationMessage(
+    createPrizeConfirmationMessage({
+      giveaway,
+      replies,
+      content:
+        '23:30:25 - 26/04/26 You sent $1,000,000 to Glenn-Rhee with the message: DroqsDB Discord Winner!\n' +
+        '23:30:26 - 26/04/26 You sent $1,000,000 to Glenn-Rhee with the message: DroqsDB Discord Winner!\n' +
+        '23:30:43 - 26/04/26 You sent $1,000,000 to Shekels with the message: DroqsDB Discord Winner!'
+    })
+  );
+
+  assert.equal(replies.length, 1);
+  assert.deepEqual(replies[0].allowedMentions.users, ['winner-1', 'winner-2']);
+  assert.equal((replies[0].content.match(/<@winner-1>/g) || []).length, 1);
+});
+
+test('GiveawayService reports partial prize confirmation matches without marking all winners sent', async () => {
+  const giveaway = createGiveawayRecord({
+    hostId: 'host-1',
+    status: 'ended',
+    winnerIds: ['winner-1', 'winner-2']
+  });
+  const replies = [];
+  const service = new GiveawayService({
+    discordClient: createDiscordClientStub(),
+    giveawayStore: {},
+    logger: createSilentLogger()
+  });
+
+  service.recordRecentGiveawayAnnouncement(giveaway, {
+    winnerReferences: [
+      {
+        winnerId: 'winner-1',
+        aliases: ['Glenn-Rhee']
+      },
+      {
+        winnerId: 'winner-2',
+        aliases: ['Shekels']
+      }
+    ]
+  });
+
+  await service.handleHostPrizeConfirmationMessage(
+    createPrizeConfirmationMessage({
+      giveaway,
+      replies,
+      content:
+        '23:30:25 - 26/04/26 You sent $1,000,000 to Glenn-Rhee with the message: DroqsDB Discord Winner!\n' +
+        '23:30:43 - 26/04/26 You sent $1,000,000 to Mystery Person with the message: DroqsDB Discord Winner!'
+    })
+  );
+
+  const announcement = service.recentGiveawayAnnouncements.get(giveaway.messageId);
+
+  assert.equal(replies.length, 1);
+  assert.match(replies[0].content, /Congrats <@winner-1>/);
+  assert.match(replies[0].content, /could not match/);
+  assert.match(replies[0].content, /Mystery Person/);
+  assert.deepEqual(replies[0].allowedMentions.users, ['winner-1']);
+  assert.deepEqual(announcement.followUpWinnerIds, ['winner-1']);
+  assert.equal(announcement.followUpSent, false);
+});
+
 test('GiveawayService posts the giveaway leaderboard once per day into #giveaways', async () => {
   const sentPayloads = [];
   const logger = createLoggerSpy();
@@ -436,6 +658,29 @@ function createDiscordClientStub() {
       async fetch() {
         return null;
       }
+    }
+  };
+}
+
+function createPrizeConfirmationMessage({
+  giveaway,
+  replies,
+  content
+}) {
+  return {
+    guildId: giveaway.guildId,
+    channelId: giveaway.channelId,
+    author: {
+      id: giveaway.hostId,
+      bot: false
+    },
+    content,
+    mentions: {
+      users: new Map()
+    },
+    async reply(payload) {
+      replies.push(payload);
+      return payload;
     }
   };
 }

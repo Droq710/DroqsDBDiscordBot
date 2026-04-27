@@ -1,8 +1,10 @@
 const {
   ALERT_MODE_AVAILABLE,
   ALERT_MODE_FLYOUT,
+  ALERT_REPEAT_EVERY_TIME,
   DEFAULT_MAX_ACTIVE_ALERTS_PER_USER,
-  normalizeAlertMode
+  normalizeAlertMode,
+  normalizeAlertRepeatMode
 } = require('../../services/alertStore');
 const { buildInfoEmbed } = require('../../utils/formatters');
 
@@ -31,6 +33,7 @@ async function createAlert(interaction, context) {
   const itemInput = interaction.options.getString('item', true);
   const countryInput = interaction.options.getString('country', true);
   const mode = normalizeAlertMode(interaction.options.getString('mode', true));
+  const repeatMode = normalizeAlertRepeatMode(interaction.options.getString('repeat'));
   const flightType = interaction.options.getString('flight_type') || null;
   const capacity = interaction.options.getInteger('capacity');
   const note = interaction.options.getString('note') || null;
@@ -56,9 +59,14 @@ async function createAlert(interaction, context) {
     itemName: snapshot.item.itemName,
     country: snapshot.country,
     mode,
+    repeatMode,
     flightType: mode === ALERT_MODE_FLYOUT ? flightType : null,
     capacity: mode === ALERT_MODE_FLYOUT ? capacity : null,
-    note
+    note,
+    lastConditionState:
+      repeatMode === ALERT_REPEAT_EVERY_TIME && mode === ALERT_MODE_AVAILABLE
+        ? isSnapshotAvailable(snapshot)
+        : null
   });
 
   context.logger.info('alert.created', {
@@ -67,6 +75,7 @@ async function createAlert(interaction, context) {
     guildId: alert.guildId,
     itemName: alert.itemName,
     mode: alert.mode,
+    repeatMode: alert.repeatMode,
     userId: alert.userId
   });
 
@@ -77,11 +86,12 @@ async function createAlert(interaction, context) {
         [
           `ID: ${alert.id}`,
           `Mode: ${formatAlertMode(alert.mode)}`,
+          `Repeat: ${formatAlertRepeatMode(alert.repeatMode)}`,
           `Item: ${alert.itemName}`,
           `Country: ${alert.country}`,
           alert.flightType ? `Flight type: ${alert.flightType}` : null,
           alert.capacity ? `Capacity: ${alert.capacity}` : null,
-          'I will ping you once in this channel when it fires.'
+          formatAlertCreateSummary(alert)
         ].filter(Boolean).join('\n')
       )
     ]
@@ -142,11 +152,32 @@ function formatAlertMode(mode) {
   return mode === ALERT_MODE_FLYOUT ? 'Fly-out' : 'Available now';
 }
 
+function formatAlertListMode(mode) {
+  return mode === ALERT_MODE_FLYOUT ? 'Fly-out' : 'Available';
+}
+
+function formatAlertRepeatMode(repeatMode) {
+  return normalizeAlertRepeatMode(repeatMode) === ALERT_REPEAT_EVERY_TIME ? 'Every time' : 'Once';
+}
+
+function formatAlertCreateSummary(alert) {
+  if (normalizeAlertRepeatMode(alert.repeatMode) !== ALERT_REPEAT_EVERY_TIME) {
+    return 'I will ping you once in this channel when it fires.';
+  }
+
+  if (alert.mode === ALERT_MODE_FLYOUT) {
+    return 'I will ping you every time this run becomes ready to fly.';
+  }
+
+  return 'I will ping you every time it comes back in stock.';
+}
+
 function formatAlertListLine(alert) {
   const parts = [
     `#${alert.id}`,
-    formatAlertMode(alert.mode),
-    `${alert.itemName} in ${alert.country}`
+    `${alert.itemName} / ${alert.country}`,
+    formatAlertListMode(alert.mode),
+    formatAlertRepeatMode(alert.repeatMode)
   ];
 
   if (alert.flightType) {
@@ -158,6 +189,11 @@ function formatAlertListLine(alert) {
   }
 
   return parts.join(' - ');
+}
+
+function isSnapshotAvailable(snapshot) {
+  const stock = Number(snapshot?.countryRow?.stock);
+  return Number.isFinite(stock) && stock > 0;
 }
 
 module.exports = {
