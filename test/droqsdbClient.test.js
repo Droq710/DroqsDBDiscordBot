@@ -163,6 +163,59 @@ test('travel planner queries use the bot fixed 19/private profile by default', a
   assert.equal(requestBody.limit, 2);
 });
 
+test('daily forecast lookup uses the public daily-forecast endpoint and normalizes items', async () => {
+  const client = new DroqsDbClient({
+    baseUrl: 'https://droqsdb.example.test/api/public/v1',
+    webBaseUrl: 'https://droqsdb.example.test',
+    cache: createCache(),
+    logger: createLogger()
+  });
+  let capturedPathname = null;
+
+  client.requestJson = async (pathname) => {
+    capturedPathname = pathname;
+
+    return {
+      generatedAt: '2026-04-28T08:00:00.000Z',
+      items: [
+        {
+          rank: 1,
+          itemName: 'Xanax',
+          country: 'Japan',
+          profitPerItem: '123456',
+          profitPerMinute: '1234.5',
+          confidence: 'High',
+          confidencePercent: '91',
+          flyOutWindows: [
+            {
+              leaveAtTct: '09:30 TCT',
+              leaveWindowEndAtTct: '10:30 TCT',
+              availability: 'Projected On Arrival',
+              tightWindow: true
+            }
+          ]
+        },
+        {
+          itemName: '',
+          country: 'Japan'
+        }
+      ],
+      warnings: ['sample warning']
+    };
+  };
+
+  const payload = await client.getDailyForecast();
+
+  assert.equal(capturedPathname, 'daily-forecast');
+  assert.equal(payload.apiPath, '/api/public/v1/daily-forecast');
+  assert.equal(payload.items.length, 1);
+  assert.equal(payload.items[0].itemName, 'Xanax');
+  assert.equal(payload.items[0].profitPerItem, 123456);
+  assert.equal(payload.items[0].confidence, 'high');
+  assert.equal(payload.items[0].flyOutWindows[0].availability, 'projected on arrival');
+  assert.deepEqual(payload.warnings, ['sample warning']);
+});
+
 test('market sell-target lookups use the planner instead of top-profits defaults', async () => {
   const client = new DroqsDbClient({
     baseUrl: 'https://api.example.test',

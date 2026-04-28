@@ -5,6 +5,11 @@ const {
   formatAutopostMode,
   formatAutopostModeSummary
 } = require('./autopost');
+const {
+  DEFAULT_DAILY_FORECAST_COUNT,
+  normalizeDailyForecastCount,
+  normalizeDailyForecastTime
+} = require('./dailyForecast');
 
 const COLORS = Object.freeze({
   info: 0x5865f2,
@@ -53,7 +58,12 @@ const HELP_GROUPS = Object.freeze([
   }),
   Object.freeze({
     title: 'Autopost',
-    commandNames: ['/autopost enable', '/autopost disable', '/autopost status']
+    commandNames: [
+      '/autopost enable',
+      '/autopost daily-forecast',
+      '/autopost disable',
+      '/autopost status'
+    ]
   }),
   Object.freeze({
     title: 'Giveaways',
@@ -69,6 +79,9 @@ const HELP_GROUPS = Object.freeze([
 
 const BOT_RUN_RESULTS_NOTE =
   'Bot results use 19 carry capacity and private flight. Adjust your own settings on [DroqsDB](https://droqsdb.com).';
+const DAILY_FORECAST_DISCLAIMER =
+  'Forecasts are estimates based on current data and historical restock behavior, not guarantees.';
+const MAX_DAILY_FORECAST_WINDOWS_DISPLAYED = 5;
 
 const moneyFormatter = new Intl.NumberFormat('en-US', {
   style: 'currency',
@@ -915,6 +928,198 @@ function buildAutopostSectionsEmbed({
   return addFreshnessFooter(embed, generatedAt);
 }
 
+function buildDailyForecastEmbed({
+  forecast,
+  count = DEFAULT_DAILY_FORECAST_COUNT,
+  url
+}) {
+  const displayCount = normalizeDailyForecastCount(count);
+  const items = Array.isArray(forecast?.items) ? forecast.items.slice(0, displayCount) : [];
+  const horizonHours = toNumber(forecast?.horizonHours) || 24;
+  const embed = buildBaseEmbed({
+    title: '📅 DroqsDB Daily Travel Forecast',
+    description: [
+      `Best predicted travel opportunities for the next ${formatCount(horizonHours)} hours.`,
+      DAILY_FORECAST_DISCLAIMER
+    ].join('\n'),
+    color: items.length ? COLORS.success : COLORS.info,
+    url
+  });
+
+  if (!items.length) {
+    embed.addFields({
+      name: 'No Forecast Opportunities',
+      value:
+        'DroqsDB did not return any qualified daily forecast items for the configured forecast settings.',
+      inline: false
+    });
+
+    return addDailyForecastFooter(embed, forecast?.generatedAt);
+  }
+
+  for (const [index, item] of items.entries()) {
+    embed.addFields({
+      name: formatDailyForecastFieldName(item, index),
+      value: buildDailyForecastFieldValue(item, forecast?.generatedAt),
+      inline: false
+    });
+  }
+
+  return addDailyForecastFooter(embed, forecast?.generatedAt);
+}
+
+function addDailyForecastFooter(embed, generatedAt, sourceLabel = 'DroqsDB Public API') {
+  const footerText = generatedAt
+    ? `Source: ${sourceLabel} | Generated ${formatFooterTctDate(generatedAt)}`
+    : `Source: ${sourceLabel}`;
+
+  embed.setFooter({
+    text: footerText
+  });
+
+  return embed;
+}
+
+function formatDailyForecastFieldName(item, index) {
+  const rank = Number.isInteger(Number(item?.rank)) && Number(item.rank) > 0
+    ? Number(item.rank)
+    : index + 1;
+
+  return `#${rank} ${[item?.itemName || 'Item', item?.country].filter(Boolean).join(' - ')}`;
+}
+
+function buildDailyForecastFieldValue(item, generatedAt) {
+  const lines = [
+    buildDailyForecastProfitLine(item),
+    `Fly-out times: ${formatDailyForecastWindows(item, generatedAt)}`,
+    `Confidence: ${formatDailyForecastConfidence(item)}`
+  ];
+  const note = formatDailyForecastNote(item);
+
+  if (note) {
+    lines.push(`Note: ${note}`);
+  }
+
+  return truncateText(lines.filter(Boolean).join('\n'), 1024);
+}
+
+function buildDailyForecastProfitLine(item) {
+  const parts = joinCompactParts([
+    toNumber(item?.profitPerItem) !== null ? `Profit/item: ${formatMoney(item.profitPerItem)}` : null,
+    toNumber(item?.profitPerMinute) !== null ? `Profit/min: ${formatMoney(item.profitPerMinute)}` : null
+  ]);
+
+  return parts || 'Profit: N/A';
+}
+
+function formatDailyForecastWindows(item, generatedAt) {
+  const windows = Array.isArray(item?.flyOutWindows) ? item.flyOutWindows : [];
+
+  if (!windows.length) {
+    return 'No fly-out windows returned.';
+  }
+
+  const displayedWindows = windows
+    .slice(0, MAX_DAILY_FORECAST_WINDOWS_DISPLAYED)
+    .map((window) => formatDailyForecastWindow(item, window, generatedAt));
+  const omittedCount = windows.length - displayedWindows.length;
+  const suffix = omittedCount > 0 ? `, +${omittedCount} more` : '';
+
+  return `${displayedWindows.join(', ')}${suffix}`;
+}
+
+function formatDailyForecastWindow(item, window, generatedAt) {
+  const start = formatTctWindowLabel(window?.leaveAtTct, window?.leaveAt);
+  const end = formatTctWindowLabel(window?.leaveWindowEndAtTct, window?.leaveWindowEndAt);
+
+  if (isCurrentlyViableForecastWindow(item, window, generatedAt)) {
+    return end && end !== start ? `Currently viable until ${end}` : 'Currently viable';
+  }
+
+  if (start && end && start !== end) {
+    return `${start} to ${end}`;
+  }
+
+  return start || end || 'Time unavailable';
+}
+
+function formatTctWindowLabel(explicitTct, timestamp) {
+  const normalizedTct = String(explicitTct || '').trim();
+
+  if (normalizedTct) {
+    return /tct/i.test(normalizedTct) ? normalizedTct : `${normalizedTct} TCT`;
+  }
+
+  if (timestamp) {
+    return `${formatTctClockTime(timestamp)} TCT`;
+  }
+
+  return null;
+}
+
+function isCurrentlyViableForecastWindow(item, window, generatedAt) {
+  if (normalizeComparableText(window?.availability) !== 'in_stock' || toNumber(item?.currentStock) <= 0) {
+    return false;
+  }
+
+  const leaveAt = Date.parse(window?.leaveAt || '');
+  const generated = Date.parse(generatedAt || '');
+
+  if (!Number.isFinite(leaveAt) || !Number.isFinite(generated)) {
+    return true;
+  }
+
+  return leaveAt <= generated + 15 * 60 * 1000;
+}
+
+function formatDailyForecastConfidence(item) {
+  const label = capitalizeWords(item?.confidence || 'Unknown');
+  const percent = toNumber(item?.confidencePercent);
+
+  return percent === null ? label : `${label} (${formatCount(percent)}%)`;
+}
+
+function formatDailyForecastNote(item) {
+  const windows = Array.isArray(item?.flyOutWindows) ? item.flyOutWindows : [];
+  const parts = [];
+
+  if (windows.some((window) => window?.tightWindow === true)) {
+    parts.push('Tight window');
+  }
+
+  if (toNumber(item?.bestSafetyMarginMinutes) !== null) {
+    parts.push(`Best safety margin ${formatDurationMinutes(item.bestSafetyMarginMinutes)}`);
+  }
+
+  const reason = String(
+    windows.find((window) => window?.reason)?.reason || item?.forecastSummary || ''
+  ).trim();
+
+  if (reason) {
+    parts.push(truncateText(reason, 120));
+  }
+
+  return truncateText(parts.join(' | '), 240);
+}
+
+function formatFooterTctDate(value) {
+  const timestamp = Date.parse(value || '');
+
+  if (!Number.isFinite(timestamp)) {
+    return 'Unknown';
+  }
+
+  return `${new Date(timestamp).toISOString().slice(0, 16).replace('T', ' ')} TCT`;
+}
+
+function capitalizeWords(value) {
+  return String(value || '')
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1).toLowerCase()}`)
+    .join(' ') || 'Unknown';
+}
+
 function buildHelpEmbed({ webBaseUrl }) {
   const embed = buildBaseEmbed({
     title: 'DroqsDB Bot Help',
@@ -992,34 +1197,45 @@ function buildAutopostStatusEmbed({
   if (!config) {
     return buildBaseEmbed({
       title: 'Autopost Status',
-      description: 'Autopost is not configured for this server yet.\nUse `/autopost enable` to start hourly posts.',
+      description:
+        'Autopost is not configured for this server yet.\nUse `/autopost enable` for hourly posts or `/autopost daily-forecast` for the daily forecast.',
       color: COLORS.info,
       url
     });
   }
 
+  const anyEnabled = config.autopostEnabled || config.dailyForecastEnabled;
   const embed = buildBaseEmbed({
     title: 'Autopost Status',
     description: [
-      config.autopostEnabled ? '**Enabled**' : '**Disabled**',
-      `${config.autopostEnabled ? 'Channel' : 'Configured channel'}: ${
-        config.channelId ? `<#${config.channelId}>` : 'Not configured'
-      }`,
-      `Mode: ${formatAutopostMode(config.mode)}`
+      `Hourly top-runs: ${config.autopostEnabled ? '**Enabled**' : '**Disabled**'}`,
+      `Daily forecast: ${config.dailyForecastEnabled ? '**Enabled**' : '**Disabled**'}`
     ].join('\n'),
-    color: config.autopostEnabled ? COLORS.success : COLORS.warning,
+    color: anyEnabled ? COLORS.success : COLORS.warning,
     url
   });
 
   embed.addFields(
     {
-      name: 'Mode Summary',
-      value: formatAutopostModeSummary(config),
+      name: 'Hourly Top Runs',
+      value: [
+        `Channel: ${config.channelId ? `<#${config.channelId}>` : 'Not configured'}`,
+        `Mode: ${formatAutopostMode(config.mode)}`,
+        `Mode Details: ${formatAutopostModeSummary(config)}`,
+        `Filters: ${formatAutopostFilters(config)}`
+      ].join('\n'),
       inline: false
     },
     {
-      name: 'Filters',
-      value: formatAutopostFilters(config),
+      name: 'Daily Forecast',
+      value: [
+        `Channel: ${
+          config.dailyForecastChannelId ? `<#${config.dailyForecastChannelId}>` : 'Not configured'
+        }`,
+        `Post Time: ${normalizeDailyForecastTime(config.dailyForecastTime)} TCT`,
+        `Count: ${normalizeDailyForecastCount(config.dailyForecastCount)}`,
+        `Last Posted: ${config.dailyForecastLastPostDate || 'Never'}`
+      ].join('\n'),
       inline: false
     },
     {
@@ -1032,6 +1248,18 @@ function buildAutopostStatusEmbed({
     {
       name: 'Updated By',
       value: config.updatedBy ? `<@${config.updatedBy}>` : 'Unknown',
+      inline: true
+    },
+    {
+      name: 'Daily Updated',
+      value: config.dailyForecastUpdatedAt
+        ? `${toDiscordTimestamp(config.dailyForecastUpdatedAt, 'F')} (${toDiscordTimestamp(config.dailyForecastUpdatedAt, 'R')})`
+        : 'Unknown',
+      inline: true
+    },
+    {
+      name: 'Daily Updated By',
+      value: config.dailyForecastUpdatedBy ? `<@${config.dailyForecastUpdatedBy}>` : 'Unknown',
       inline: true
     }
   );
@@ -1116,6 +1344,7 @@ module.exports = {
   buildAutopostSectionsEmbed,
   buildAutopostStatusEmbed,
   buildBestRunEmbed,
+  buildDailyForecastEmbed,
   buildErrorEmbed,
   buildHelpEmbed,
   buildInfoEmbed,

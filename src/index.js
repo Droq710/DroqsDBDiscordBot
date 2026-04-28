@@ -89,6 +89,8 @@ async function main() {
     guildConfigStore,
     cronExpression: config.autopostCron,
     timezone: config.autopostTimezone,
+    dailyForecastCronExpression: config.dailyForecastCron,
+    dailyForecastTimezone: config.dailyForecastTimezone,
     logger: rootLogger.child({
       component: 'autopost'
     })
@@ -137,6 +139,8 @@ async function main() {
     autopostCron: config.autopostCron,
     autopostDatabasePath: config.autopostDbFile,
     autopostTimezone: config.autopostTimezone,
+    dailyForecastCron: config.dailyForecastCron,
+    dailyForecastTimezone: config.dailyForecastTimezone,
     alertCheckIntervalMs: config.alertCheckIntervalMs,
     activeAlerts: health.activeAlerts,
     commandGuildRateLimitMax: config.commandGuildRateLimitMax,
@@ -145,6 +149,7 @@ async function main() {
     commandUserRateLimitWindowMs: config.commandUserRateLimitWindowMs,
     droqsdbStatus: health.droqsdbStatus,
     enabledAutopostGuilds: health.enabledAutopostGuilds,
+    enabledDailyForecastGuilds: health.enabledDailyForecastGuilds,
     pendingGiveaways: health.pendingGiveaways,
     metaGeneratedAt: health.generatedAt,
     requestTimeoutMs: config.droqsdbApiTimeoutMs,
@@ -343,6 +348,7 @@ async function runStartupHealthCheck({
   return {
     droqsdbStatus,
     enabledAutopostGuilds: guildConfigStore.listEnabledGuildConfigs().length,
+    enabledDailyForecastGuilds: guildConfigStore.listEnabledDailyForecastConfigs().length,
     pendingGiveaways: giveawayStore.listPendingGiveaways().length,
     activeAlerts: alertStore.listActiveAlerts().length,
     generatedAt

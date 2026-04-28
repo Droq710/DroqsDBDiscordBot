@@ -58,6 +58,11 @@ const COMMAND_HELP_ENTRIES = Object.freeze([
       'Usage: `/autopost enable channel:<channel> [count:<1-10>] [mode] [categories:<csv>] [countries:<csv>]`\nTurns on hourly guild autoposts. Modes: Top N, Flight Groups, Category Groups, Full Breakdown. Requires `Manage Server`.'
   },
   {
+    name: '/autopost daily-forecast',
+    value:
+      'Usage: `/autopost daily-forecast enabled:<true|false> [channel] [time:<HH:mm TCT>] [count:<1-10>]`\nTurns the once-daily DroqsDB Daily Travel Forecast autopost on or off. Requires `Manage Server`.'
+  },
+  {
     name: '/autopost disable',
     value: 'Usage: `/autopost disable`\nTurns off hourly guild autoposts. Requires `Manage Server`.'
   },

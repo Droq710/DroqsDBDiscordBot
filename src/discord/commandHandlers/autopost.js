@@ -12,6 +12,12 @@ const {
   parseAutopostCategoryInput,
   parseAutopostCountryInput
 } = require('../../utils/autopost');
+const {
+  DEFAULT_DAILY_FORECAST_COUNT,
+  DEFAULT_DAILY_FORECAST_TIME,
+  normalizeDailyForecastCount,
+  parseDailyForecastTime
+} = require('../../utils/dailyForecast');
 
 function assertGuildAdmin(interaction) {
   if (!interaction.inGuild()) {
@@ -127,6 +133,84 @@ async function execute(interaction, context) {
       ephemeral: true
     });
     return;
+  }
+
+  if (subcommand === 'daily-forecast') {
+    const enabled = interaction.options.getBoolean('enabled', true);
+    const existingConfig = await context.autopostService.getGuildConfig(interaction.guildId);
+
+    if (!enabled) {
+      const guildConfig = await context.autopostService.disableDailyForecast({
+        guildId: interaction.guildId,
+        updatedBy: interaction.user.id
+      });
+      context.logger.info('daily_forecast.disabled', {
+        guildId: interaction.guildId,
+        userId: interaction.user.id
+      });
+
+      await interaction.reply({
+        embeds: [
+          buildInfoEmbed(
+            'Daily Forecast Disabled',
+            'DroqsDB Daily Travel Forecast autoposting has been turned off for this server.',
+            { url: context.config.droqsdbWebBaseUrl }
+          )
+        ],
+        ephemeral: true
+      });
+      return guildConfig;
+    }
+
+    const channel = interaction.options.getChannel('channel') || null;
+    const channelId = channel?.id || existingConfig?.dailyForecastChannelId || null;
+    const timeInput = interaction.options.getString('time');
+    const time = timeInput
+      ? parseDailyForecastTime(timeInput)
+      : existingConfig?.dailyForecastTime || DEFAULT_DAILY_FORECAST_TIME;
+    const count = normalizeDailyForecastCount(
+      interaction.options.getInteger('count') ?? existingConfig?.dailyForecastCount,
+      DEFAULT_DAILY_FORECAST_COUNT
+    );
+
+    if (!channelId) {
+      throw new Error('Choose a channel the first time you enable the daily forecast.');
+    }
+
+    if (channel) {
+      assertSendableChannel(interaction, channel);
+    }
+
+    const guildConfig = await context.autopostService.enableDailyForecast({
+      guildId: interaction.guildId,
+      channelId,
+      time,
+      count,
+      updatedBy: interaction.user.id
+    });
+    context.logger.info('daily_forecast.enabled', {
+      channelId: guildConfig.dailyForecastChannelId,
+      count: guildConfig.dailyForecastCount,
+      guildId: interaction.guildId,
+      postTime: guildConfig.dailyForecastTime,
+      userId: interaction.user.id
+    });
+
+    await interaction.reply({
+      embeds: [
+        buildInfoEmbed(
+          'Daily Forecast Enabled',
+          [
+            `DroqsDB Daily Travel Forecast posts will be sent to <#${guildConfig.dailyForecastChannelId}>.`,
+            `Post Time: ${guildConfig.dailyForecastTime} TCT`,
+            `Count: ${guildConfig.dailyForecastCount}`
+          ].join('\n'),
+          { url: context.config.droqsdbWebBaseUrl }
+        )
+      ],
+      ephemeral: true
+    });
+    return guildConfig;
   }
 
   await context.autopostService.disable({

@@ -10,7 +10,7 @@ The bot stays intentionally thin:
 - repeated API requests are cached briefly in memory
 - command protection uses simple in-memory per-user and per-guild rate limits
 - structured JSON logs make public hosting easier to monitor
-- hourly autopost state stays per guild in a small SQLite database
+- hourly and daily forecast autopost state stays per guild in a small SQLite database
 
 ## Features
 
@@ -24,6 +24,7 @@ The bot stays intentionally thin:
 - `/stock item:<item name> country:<country>`
 - `/restock item:<item name> country:<country>`
 - `/autopost enable channel:<channel> [count:<1-10>] [mode:<top_n|flight_groups|category_groups|full_breakdown>] [categories:<csv>] [countries:<csv>]`
+- `/autopost daily-forecast enabled:<true|false> [channel:<channel>] [time:<HH:mm TCT>] [count:<1-10>]`
 - `/autopost disable`
 - `/autopost status`
 
@@ -100,6 +101,8 @@ If you are testing first, register commands with `DISCORD_GUILD_ID` set to your 
 | `COMMAND_GUILD_RATE_LIMIT_MAX` | No | Max slash commands allowed per guild inside one guild window |
 | `AUTOPOST_CRON` | No | Cron expression for hourly autoposts |
 | `AUTOPOST_TIMEZONE` | No | Cron timezone |
+| `DAILY_FORECAST_CRON` | No | Cron expression for checking due daily forecast posts |
+| `DAILY_FORECAST_TIMEZONE` | No | Cron timezone for the daily forecast checker; keep UTC for TCT |
 | `AUTOPOST_DB_FILE` | No | SQLite path used to store per-guild autopost configuration |
 | `AUTOPOST_DATA_FILE` | No | Optional legacy JSON path used for one-time migration from the MVP autopost storage |
 
@@ -119,7 +122,9 @@ It does not store Discord message history, and DroqsDB remains the source of tru
 
 - `/autopost enable` stores per-guild autopost settings in SQLite
 - each guild keeps enabled or disabled state, channel, mode, count, and optional country/category filter arrays
+- `/autopost daily-forecast` stores a separate enabled flag, channel, TCT post time, and forecast count
 - the scheduler loops through enabled guilds every hour
+- the daily forecast checker runs every minute and posts once per guild when its configured TCT time is due
 - overlapping scheduler runs are skipped defensively
 - invalid or unsendable channel configs are disabled automatically with warning logs
 - autopost fetch failures caused by DroqsDB downtime are skipped cleanly and retried on the next schedule
@@ -156,6 +161,7 @@ src/
     rateLimiter.js
   utils/
     autopost.js
+    dailyForecast.js
     formatters.js
   config.js
   index.js
@@ -176,6 +182,7 @@ This bot consumes the live DroqsDB public API:
 
 - `https://droqsdb.com/api/public/v1/meta`
 - `https://droqsdb.com/api/public/v1/top-profits`
+- `https://droqsdb.com/api/public/v1/daily-forecast`
 - `https://droqsdb.com/api/public/v1/country/:country`
 - `https://droqsdb.com/api/public/v1/item/:itemName`
 - `https://droqsdb.com/api/public/v1/items`

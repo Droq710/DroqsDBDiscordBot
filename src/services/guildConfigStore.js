@@ -7,6 +7,12 @@ const {
   normalizeAutopostMode,
   normalizeAutopostFilters
 } = require('../utils/autopost');
+const {
+  DEFAULT_DAILY_FORECAST_COUNT,
+  DEFAULT_DAILY_FORECAST_TIME,
+  normalizeDailyForecastCount,
+  normalizeDailyForecastTime
+} = require('../utils/dailyForecast');
 
 class GuildConfigStore {
   constructor({
@@ -42,6 +48,13 @@ class GuildConfigStore {
         preset_category TEXT,
         preset_countries TEXT NOT NULL DEFAULT '[]',
         preset_categories TEXT NOT NULL DEFAULT '[]',
+        daily_forecast_enabled INTEGER NOT NULL DEFAULT 0,
+        daily_forecast_channel_id TEXT,
+        daily_forecast_time TEXT NOT NULL DEFAULT '08:00',
+        daily_forecast_count INTEGER NOT NULL DEFAULT 10,
+        daily_forecast_last_post_date TEXT,
+        daily_forecast_updated_at TEXT,
+        daily_forecast_updated_by TEXT,
         updated_at TEXT NOT NULL,
         updated_by TEXT
       );
@@ -79,6 +92,12 @@ class GuildConfigStore {
   listEnabledGuildConfigs() {
     return this.requireStatements()
       .selectEnabled.all()
+      .map(mapGuildConfigRow);
+  }
+
+  listEnabledDailyForecastConfigs() {
+    return this.requireStatements()
+      .selectDailyForecastEnabled.all()
       .map(mapGuildConfigRow);
   }
 
@@ -130,6 +149,53 @@ class GuildConfigStore {
     return this.getGuildConfig(guildId);
   }
 
+  saveGuildDailyForecastConfig({
+    guildId,
+    channelId,
+    time = DEFAULT_DAILY_FORECAST_TIME,
+    count = DEFAULT_DAILY_FORECAST_COUNT,
+    updatedBy = null
+  }) {
+    const row = {
+      guildId: String(guildId),
+      channelId: String(channelId),
+      time: normalizeDailyForecastTime(time),
+      count: normalizeDailyForecastCount(count),
+      updatedAt: new Date().toISOString(),
+      updatedBy: updatedBy ? String(updatedBy) : null
+    };
+
+    this.requireStatements().upsertDailyForecast.run(row);
+    return this.getGuildConfig(guildId);
+  }
+
+  disableGuildDailyForecast({
+    guildId,
+    updatedBy = null
+  }) {
+    this.requireStatements().disableDailyForecast.run({
+      guildId: String(guildId),
+      time: DEFAULT_DAILY_FORECAST_TIME,
+      count: DEFAULT_DAILY_FORECAST_COUNT,
+      updatedAt: new Date().toISOString(),
+      updatedBy: updatedBy ? String(updatedBy) : null
+    });
+
+    return this.getGuildConfig(guildId);
+  }
+
+  markDailyForecastPosted({
+    guildId,
+    dateKey
+  }) {
+    this.requireStatements().markDailyForecastPosted.run({
+      guildId: String(guildId),
+      dateKey: String(dateKey)
+    });
+
+    return this.getGuildConfig(guildId);
+  }
+
   prepareStatements() {
     this.statements = {
       countGuilds: this.db.prepare('SELECT COUNT(*) AS count FROM guild_autopost_configs'),
@@ -144,6 +210,13 @@ class GuildConfigStore {
           preset_category,
           preset_countries,
           preset_categories,
+          daily_forecast_enabled,
+          daily_forecast_channel_id,
+          daily_forecast_time,
+          daily_forecast_count,
+          daily_forecast_last_post_date,
+          daily_forecast_updated_at,
+          daily_forecast_updated_by,
           updated_at,
           updated_by
         FROM guild_autopost_configs
@@ -160,10 +233,41 @@ class GuildConfigStore {
           preset_category,
           preset_countries,
           preset_categories,
+          daily_forecast_enabled,
+          daily_forecast_channel_id,
+          daily_forecast_time,
+          daily_forecast_count,
+          daily_forecast_last_post_date,
+          daily_forecast_updated_at,
+          daily_forecast_updated_by,
           updated_at,
           updated_by
         FROM guild_autopost_configs
         WHERE autopost_enabled = 1
+        ORDER BY guild_id ASC
+      `),
+      selectDailyForecastEnabled: this.db.prepare(`
+        SELECT
+          guild_id,
+          autopost_enabled,
+          channel_id,
+          count,
+          preset_mode,
+          preset_country,
+          preset_category,
+          preset_countries,
+          preset_categories,
+          daily_forecast_enabled,
+          daily_forecast_channel_id,
+          daily_forecast_time,
+          daily_forecast_count,
+          daily_forecast_last_post_date,
+          daily_forecast_updated_at,
+          daily_forecast_updated_by,
+          updated_at,
+          updated_by
+        FROM guild_autopost_configs
+        WHERE daily_forecast_enabled = 1
         ORDER BY guild_id ASC
       `),
       upsertGuild: this.db.prepare(`
@@ -222,6 +326,62 @@ class GuildConfigStore {
           autopost_enabled = 0,
           updated_at = excluded.updated_at,
           updated_by = excluded.updated_by
+      `),
+      upsertDailyForecast: this.db.prepare(`
+        INSERT INTO guild_autopost_configs (
+          guild_id,
+          daily_forecast_enabled,
+          daily_forecast_channel_id,
+          daily_forecast_time,
+          daily_forecast_count,
+          daily_forecast_updated_at,
+          daily_forecast_updated_by,
+          updated_at
+        ) VALUES (
+          @guildId,
+          1,
+          @channelId,
+          @time,
+          @count,
+          @updatedAt,
+          @updatedBy,
+          @updatedAt
+        )
+        ON CONFLICT(guild_id) DO UPDATE SET
+          daily_forecast_enabled = excluded.daily_forecast_enabled,
+          daily_forecast_channel_id = excluded.daily_forecast_channel_id,
+          daily_forecast_time = excluded.daily_forecast_time,
+          daily_forecast_count = excluded.daily_forecast_count,
+          daily_forecast_updated_at = excluded.daily_forecast_updated_at,
+          daily_forecast_updated_by = excluded.daily_forecast_updated_by
+      `),
+      disableDailyForecast: this.db.prepare(`
+        INSERT INTO guild_autopost_configs (
+          guild_id,
+          daily_forecast_enabled,
+          daily_forecast_time,
+          daily_forecast_count,
+          daily_forecast_updated_at,
+          daily_forecast_updated_by,
+          updated_at
+        ) VALUES (
+          @guildId,
+          0,
+          @time,
+          @count,
+          @updatedAt,
+          @updatedBy,
+          @updatedAt
+        )
+        ON CONFLICT(guild_id) DO UPDATE SET
+          daily_forecast_enabled = 0,
+          daily_forecast_updated_at = excluded.daily_forecast_updated_at,
+          daily_forecast_updated_by = excluded.daily_forecast_updated_by
+      `),
+      markDailyForecastPosted: this.db.prepare(`
+        UPDATE guild_autopost_configs
+        SET daily_forecast_last_post_date = @dateKey
+        WHERE guild_id = @guildId
       `)
     };
   }
@@ -257,6 +417,45 @@ class GuildConfigStore {
         "ALTER TABLE guild_autopost_configs ADD COLUMN preset_categories TEXT NOT NULL DEFAULT '[]'"
       );
     }
+
+    if (!columns.includes('daily_forecast_enabled')) {
+      this.db.exec(
+        'ALTER TABLE guild_autopost_configs ADD COLUMN daily_forecast_enabled INTEGER NOT NULL DEFAULT 0'
+      );
+    }
+
+    if (!columns.includes('daily_forecast_channel_id')) {
+      this.db.exec('ALTER TABLE guild_autopost_configs ADD COLUMN daily_forecast_channel_id TEXT');
+    }
+
+    if (!columns.includes('daily_forecast_time')) {
+      this.db.exec(
+        `ALTER TABLE guild_autopost_configs ADD COLUMN daily_forecast_time TEXT NOT NULL DEFAULT '${DEFAULT_DAILY_FORECAST_TIME}'`
+      );
+    }
+
+    if (!columns.includes('daily_forecast_count')) {
+      this.db.exec(
+        `ALTER TABLE guild_autopost_configs ADD COLUMN daily_forecast_count INTEGER NOT NULL DEFAULT ${DEFAULT_DAILY_FORECAST_COUNT}`
+      );
+    }
+
+    if (!columns.includes('daily_forecast_last_post_date')) {
+      this.db.exec('ALTER TABLE guild_autopost_configs ADD COLUMN daily_forecast_last_post_date TEXT');
+    }
+
+    if (!columns.includes('daily_forecast_updated_at')) {
+      this.db.exec('ALTER TABLE guild_autopost_configs ADD COLUMN daily_forecast_updated_at TEXT');
+    }
+
+    if (!columns.includes('daily_forecast_updated_by')) {
+      this.db.exec('ALTER TABLE guild_autopost_configs ADD COLUMN daily_forecast_updated_by TEXT');
+    }
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_guild_daily_forecast_enabled
+      ON guild_autopost_configs (daily_forecast_enabled);
+    `);
   }
 
   async importLegacyStateIfNeeded() {
@@ -349,6 +548,13 @@ function mapGuildConfigRow(row) {
     category: categories.length === 1 ? categories[0] : null,
     countries,
     categories,
+    dailyForecastEnabled: Boolean(row.daily_forecast_enabled),
+    dailyForecastChannelId: row.daily_forecast_channel_id || null,
+    dailyForecastTime: normalizeDailyForecastTime(row.daily_forecast_time),
+    dailyForecastCount: normalizeDailyForecastCount(row.daily_forecast_count),
+    dailyForecastLastPostDate: row.daily_forecast_last_post_date || null,
+    dailyForecastUpdatedAt: row.daily_forecast_updated_at || null,
+    dailyForecastUpdatedBy: row.daily_forecast_updated_by || null,
     updatedAt: row.updated_at || null,
     updatedBy: row.updated_by || null
   };

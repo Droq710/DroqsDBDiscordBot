@@ -32,6 +32,8 @@ const config = {
   commandGuildRateLimitMax: parsePositiveInteger(process.env.COMMAND_GUILD_RATE_LIMIT_MAX, 20),
   autopostCron: process.env.AUTOPOST_CRON || '0 * * * *',
   autopostTimezone: process.env.AUTOPOST_TIMEZONE || 'America/Chicago',
+  dailyForecastCron: process.env.DAILY_FORECAST_CRON || '* * * * *',
+  dailyForecastTimezone: process.env.DAILY_FORECAST_TIMEZONE || 'UTC',
   autopostDbFile: path.resolve(ROOT_DIR, process.env.AUTOPOST_DB_FILE || './data/autopost.sqlite'),
   legacyAutopostDataFile: path.resolve(
     ROOT_DIR,

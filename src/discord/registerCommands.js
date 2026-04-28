@@ -13,6 +13,12 @@ const {
   MAX_AUTOPOST_COUNT,
   MIN_AUTOPOST_COUNT
 } = require('../utils/autopost');
+const {
+  DEFAULT_DAILY_FORECAST_COUNT,
+  DEFAULT_DAILY_FORECAST_TIME,
+  MAX_DAILY_FORECAST_COUNT,
+  MIN_DAILY_FORECAST_COUNT
+} = require('../utils/dailyForecast');
 const { GIVEAWAY_GAME_TYPE_CHOICES } = require('../utils/giveaway');
 
 const logger = createLogger({
@@ -365,7 +371,7 @@ function buildCommands() {
 
     new SlashCommandBuilder()
       .setName('autopost')
-      .setDescription('Configure hourly DroqsDB autoposting for this server.')
+      .setDescription('Configure DroqsDB autoposting for this server.')
       .addSubcommand((subcommand) =>
         subcommand
           .setName('enable')
@@ -401,6 +407,37 @@ function buildCommands() {
               .setName('countries')
               .setDescription('Optional comma-separated countries, for example canada,japan.')
               .setMaxLength(200)
+          )
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName('daily-forecast')
+          .setDescription('Configure the once-daily DroqsDB Travel Forecast post.')
+          .addBooleanOption((option) =>
+            option
+              .setName('enabled')
+              .setDescription('Turn the daily forecast autopost on or off.')
+              .setRequired(true)
+          )
+          .addChannelOption((option) =>
+            option
+              .setName('channel')
+              .setDescription('Channel to post the daily forecast into.')
+              .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          )
+          .addStringOption((option) =>
+            option
+              .setName('time')
+              .setDescription(`TCT post time in HH:mm. Defaults to ${DEFAULT_DAILY_FORECAST_TIME}.`)
+              .setMinLength(4)
+              .setMaxLength(5)
+          )
+          .addIntegerOption((option) =>
+            option
+              .setName('count')
+              .setDescription(`How many forecast items to post. Defaults to ${DEFAULT_DAILY_FORECAST_COUNT}.`)
+              .setMinValue(MIN_DAILY_FORECAST_COUNT)
+              .setMaxValue(MAX_DAILY_FORECAST_COUNT)
           )
       )
       .addSubcommand((subcommand) =>

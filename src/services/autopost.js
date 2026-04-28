@@ -3,6 +3,7 @@ const { PermissionFlagsBits } = require('discord.js');
 const { DroqsDbApiError } = require('../api/droqsdbClient');
 const {
   buildAutopostSectionsEmbed,
+  buildDailyForecastEmbed,
   buildRunEmptyStateGuidanceEmbed
 } = require('../utils/formatters');
 const {
@@ -15,9 +16,17 @@ const {
   formatAutopostFilters,
   normalizeAutopostMode
 } = require('../utils/autopost');
+const {
+  getTctDateKey,
+  isDailyForecastDue,
+  normalizeDailyForecastCount,
+  normalizeDailyForecastTime
+} = require('../utils/dailyForecast');
 
 const AUTOPOST_FALLBACK_MESSAGE =
   '⚠️ DroqsDB data temporarily unavailable. Will try again next hour.';
+const DEFAULT_DAILY_FORECAST_CRON = '* * * * *';
+const DEFAULT_DAILY_FORECAST_TIMEZONE = 'UTC';
 
 class AutopostService {
   constructor({
@@ -26,6 +35,8 @@ class AutopostService {
     guildConfigStore,
     cronExpression,
     timezone,
+    dailyForecastCronExpression = DEFAULT_DAILY_FORECAST_CRON,
+    dailyForecastTimezone = DEFAULT_DAILY_FORECAST_TIMEZONE,
     logger = console
   }) {
     this.discordClient = discordClient;
@@ -33,31 +44,53 @@ class AutopostService {
     this.guildConfigStore = guildConfigStore;
     this.cronExpression = cronExpression;
     this.timezone = timezone;
+    this.dailyForecastCronExpression = dailyForecastCronExpression;
+    this.dailyForecastTimezone = dailyForecastTimezone;
     this.logger = logger;
     this.job = null;
+    this.dailyForecastJob = null;
     this.isPosting = false;
+    this.isPostingDailyForecast = false;
   }
 
   async start(context = {}) {
     await this.guildConfigStore.initialize();
 
-    if (this.job) {
+    if (this.job && this.dailyForecastJob) {
       this.logSchedulerState('autopost.scheduler_already_running', context);
       return;
     }
 
-    this.job = cron.schedule(
-      this.cronExpression,
-      async (executionContext) => {
-        await this.postHourlyRuns(buildSchedulerRunContext(executionContext));
-      },
-      {
-        name: 'autopost_hourly',
-        timezone: this.timezone
-      }
-    );
+    if (!this.job) {
+      this.job = cron.schedule(
+        this.cronExpression,
+        async (executionContext) => {
+          await this.postHourlyRuns(buildSchedulerRunContext(executionContext));
+        },
+        {
+          name: 'autopost_hourly',
+          timezone: this.timezone
+        }
+      );
 
-    this.attachJobListeners();
+      this.attachJobListeners();
+    }
+
+    if (!this.dailyForecastJob) {
+      this.dailyForecastJob = cron.schedule(
+        this.dailyForecastCronExpression,
+        async (executionContext) => {
+          await this.postDailyForecasts(buildSchedulerRunContext(executionContext));
+        },
+        {
+          name: 'autopost_daily_forecast',
+          timezone: this.dailyForecastTimezone
+        }
+      );
+
+      this.attachDailyForecastJobListeners();
+    }
+
     this.logSchedulerState('autopost.scheduler_started', context);
   }
 
@@ -73,6 +106,16 @@ class AutopostService {
       }
 
       this.job = null;
+    }
+
+    if (this.dailyForecastJob) {
+      this.dailyForecastJob.stop();
+
+      if (typeof this.dailyForecastJob.destroy === 'function') {
+        this.dailyForecastJob.destroy();
+      }
+
+      this.dailyForecastJob = null;
     }
 
     this.guildConfigStore.close();
@@ -140,6 +183,56 @@ class AutopostService {
     return guildConfig;
   }
 
+  async enableDailyForecast({
+    guildId,
+    channelId,
+    time,
+    count,
+    updatedBy
+  }) {
+    await this.ensureSchedulerRunning({
+      guildId: String(guildId),
+      reason: 'daily_forecast_enable',
+      requestedBy: updatedBy ? String(updatedBy) : null
+    });
+
+    const guildConfig = this.guildConfigStore.saveGuildDailyForecastConfig({
+      guildId,
+      channelId,
+      time,
+      count,
+      updatedBy
+    });
+
+    this.logSchedulerState('autopost.scheduler_refreshed', {
+      ...this.describeDailyForecastConfig(guildConfig),
+      reason: 'daily_forecast_enable',
+      requestedBy: updatedBy ? String(updatedBy) : null
+    });
+
+    return guildConfig;
+  }
+
+  async disableDailyForecast({
+    guildId,
+    updatedBy = null
+  }) {
+    await this.guildConfigStore.initialize();
+
+    const guildConfig = this.guildConfigStore.disableGuildDailyForecast({
+      guildId,
+      updatedBy
+    });
+
+    this.logSchedulerState('autopost.scheduler_refreshed', {
+      guildId: String(guildId),
+      reason: 'daily_forecast_disable',
+      requestedBy: updatedBy ? String(updatedBy) : null
+    });
+
+    return guildConfig;
+  }
+
   getGuildConfig(guildId) {
     return this.guildConfigStore.getGuildConfig(guildId);
   }
@@ -191,6 +284,157 @@ class AutopostService {
       throw error;
     } finally {
       this.isPosting = false;
+    }
+  }
+
+  async postDailyForecasts(runContext = {}) {
+    const runDate = resolveRunDate(runContext);
+    const runLogContext = {
+      ...buildRunLogContext(runContext),
+      tctDate: getTctDateKey(runDate),
+      nextScheduledAt: this.getNextDailyForecastScheduledAt()
+    };
+
+    if (this.isPostingDailyForecast) {
+      this.logger.warn('daily_forecast.overlap_skipped', runLogContext);
+      return;
+    }
+
+    this.isPostingDailyForecast = true;
+
+    try {
+      const guildConfigs = await this.guildConfigStore.listEnabledDailyForecastConfigs();
+      const dueGuildConfigs = guildConfigs.filter((guildConfig) =>
+        isDailyForecastDue(guildConfig, runDate)
+      );
+
+      if (!dueGuildConfigs.length) {
+        this.logger.info('daily_forecast.run_skipped_no_due_guilds', {
+          ...runLogContext,
+          enabledGuildCount: guildConfigs.length
+        });
+        return;
+      }
+
+      this.logger.info('daily_forecast.run_started', {
+        ...runLogContext,
+        guildCount: dueGuildConfigs.length
+      });
+
+      for (const guildConfig of dueGuildConfigs) {
+        try {
+          await this.postDailyForecastForGuild(guildConfig, runContext);
+        } catch (error) {
+          this.logger.error('daily_forecast.guild_unexpected_failure', error, {
+            ...this.describeDailyForecastConfig(guildConfig),
+            ...buildRunLogContext(runContext)
+          });
+        }
+      }
+
+      this.logger.info('daily_forecast.run_finished', {
+        ...runLogContext,
+        guildCount: dueGuildConfigs.length,
+        nextScheduledAt: this.getNextDailyForecastScheduledAt()
+      });
+    } catch (error) {
+      this.logger.error('daily_forecast.run_failed', error, runLogContext);
+      throw error;
+    } finally {
+      this.isPostingDailyForecast = false;
+    }
+  }
+
+  async postDailyForecastForGuild(guildConfig, runContext = {}) {
+    const activeGuildConfig = this.guildConfigStore.getGuildConfig(guildConfig.guildId);
+    const runDate = resolveRunDate(runContext);
+
+    if (!isDailyForecastDue(activeGuildConfig, runDate)) {
+      this.logger.info('daily_forecast.guild_skipped_not_due', {
+        guildId: guildConfig.guildId,
+        ...buildRunLogContext(runContext)
+      });
+      return;
+    }
+
+    const channelConfig = {
+      ...activeGuildConfig,
+      channelId: activeGuildConfig.dailyForecastChannelId
+    };
+    const channel = await this.resolveChannel(channelConfig, runContext, {
+      onInvalidConfig: (_invalidConfig, reason, invalidRunContext) =>
+        this.disableInvalidDailyForecastConfig(activeGuildConfig, reason, invalidRunContext)
+    });
+
+    if (!channel) {
+      return;
+    }
+
+    this.logger.info('daily_forecast.post_attempt', {
+      ...this.describeDailyForecastConfig(activeGuildConfig),
+      ...buildRunLogContext(runContext),
+      targetChannelId: channel.id
+    });
+
+    const payload = await this.fetchDailyForecastPayload({
+      guildConfig: activeGuildConfig,
+      runContext,
+      targetChannelId: channel.id
+    });
+
+    if (!payload) {
+      return;
+    }
+
+    let embed;
+
+    try {
+      embed = buildDailyForecastEmbed({
+        forecast: payload,
+        count: activeGuildConfig.dailyForecastCount,
+        url: this.droqsdbClient.webBaseUrl
+      });
+    } catch (error) {
+      this.logger.error('daily_forecast.embed_build_failed', error, {
+        ...this.describeDailyForecastConfig(activeGuildConfig),
+        ...buildRunLogContext(runContext),
+        apiPath: payload.apiPath || null,
+        resultCount: Array.isArray(payload.items) ? payload.items.length : null
+      });
+      return;
+    }
+
+    try {
+      await channel.send({
+        embeds: [embed]
+      });
+
+      this.guildConfigStore.markDailyForecastPosted({
+        guildId: activeGuildConfig.guildId,
+        dateKey: getTctDateKey(runDate)
+      });
+
+      this.logger.info('daily_forecast.posted', {
+        ...this.describeDailyForecastConfig(activeGuildConfig),
+        ...buildRunLogContext(runContext),
+        apiPath: payload.apiPath || null,
+        resultCount: Array.isArray(payload.items) ? payload.items.length : 0
+      });
+    } catch (error) {
+      this.logger.error('daily_forecast.post_failed', error, {
+        ...this.describeDailyForecastConfig(activeGuildConfig),
+        ...buildRunLogContext(runContext),
+        apiPath: payload.apiPath || null,
+        resultCount: Array.isArray(payload.items) ? payload.items.length : 0
+      });
+
+      if ([10003, 50001, 50013].includes(Number(error.code))) {
+        await this.disableInvalidDailyForecastConfig(
+          activeGuildConfig,
+          `daily forecast post failed with Discord error code ${error.code}`,
+          runContext
+        );
+      }
     }
   }
 
@@ -402,6 +646,55 @@ class AutopostService {
     }
   }
 
+  async fetchDailyForecastPayload({
+    guildConfig,
+    runContext = {},
+    targetChannelId = null
+  }) {
+    const fetchContext = {
+      ...this.describeDailyForecastConfig(guildConfig),
+      ...buildRunLogContext(runContext),
+      requestTimeoutMs: this.droqsdbClient.requestTimeoutMs,
+      targetChannelId
+    };
+    const fetchForecast = () => this.droqsdbClient.getDailyForecast();
+
+    this.logger.info('daily_forecast.fetch_attempt', {
+      ...fetchContext,
+      attempt: 1
+    });
+
+    try {
+      return await fetchForecast();
+    } catch (error) {
+      if (!shouldRetryAutopostFetch(error)) {
+        this.logger.error('daily_forecast.fetch_failed_final', error, {
+          ...fetchContext,
+          attempts: 1,
+          retried: false
+        });
+        return null;
+      }
+
+      this.logger.warn('daily_forecast.fetch_retry', error, {
+        ...fetchContext,
+        nextAttempt: 2,
+        previousAttempt: 1
+      });
+
+      try {
+        return await fetchForecast();
+      } catch (retryError) {
+        this.logger.error('daily_forecast.fetch_failed_final', retryError, {
+          ...fetchContext,
+          attempts: 2,
+          retried: true
+        });
+        return null;
+      }
+    }
+  }
+
   async sendFallbackMessage(channel, guildConfig, runContext = {}, {
     apiPath = null,
     reason = 'fetch_failed'
@@ -442,9 +735,12 @@ class AutopostService {
     }
   }
 
-  async resolveChannel(guildConfig, runContext = {}) {
+  async resolveChannel(guildConfig, runContext = {}, {
+    onInvalidConfig = (invalidConfig, reason, invalidRunContext) =>
+      this.disableInvalidConfig(invalidConfig, reason, invalidRunContext)
+  } = {}) {
     if (!guildConfig.channelId) {
-      await this.disableInvalidConfig(guildConfig, 'no channel is configured', runContext);
+      await onInvalidConfig(guildConfig, 'no channel is configured', runContext);
       return null;
     }
 
@@ -459,7 +755,7 @@ class AutopostService {
       });
 
       if ([10003, 50001, 50013].includes(Number(error.code))) {
-        await this.disableInvalidConfig(
+        await onInvalidConfig(
           guildConfig,
           `channel fetch failed with Discord error code ${error.code}`,
           runContext
@@ -470,7 +766,7 @@ class AutopostService {
     }
 
     if (!channel || !channel.isTextBased() || typeof channel.send !== 'function') {
-      await this.disableInvalidConfig(
+      await onInvalidConfig(
         guildConfig,
         'configured channel is no longer text-sendable',
         runContext
@@ -479,7 +775,7 @@ class AutopostService {
     }
 
     if (channel.guildId !== guildConfig.guildId) {
-      await this.disableInvalidConfig(
+      await onInvalidConfig(
         guildConfig,
         'configured channel no longer belongs to the guild',
         runContext
@@ -496,7 +792,7 @@ class AutopostService {
       : REQUIRED_AUTOPOST_PERMISSIONS.slice();
 
     if (missingPermissions.length) {
-      await this.disableInvalidConfig(
+      await onInvalidConfig(
         guildConfig,
         `missing permissions: ${missingPermissions.map(formatPermissionName).join(', ')}`,
         runContext
@@ -520,6 +816,19 @@ class AutopostService {
     });
   }
 
+  async disableInvalidDailyForecastConfig(guildConfig, reason, runContext = {}) {
+    this.logger.warn('daily_forecast.config_disabled', {
+      ...this.describeDailyForecastConfig(guildConfig),
+      ...buildRunLogContext(runContext),
+      reason
+    });
+
+    await this.disableDailyForecast({
+      guildId: guildConfig.guildId,
+      updatedBy: 'system'
+    });
+  }
+
   describeGuildConfig(guildConfig) {
     return {
       channelId: guildConfig.channelId || null,
@@ -527,6 +836,15 @@ class AutopostService {
       filters: formatAutopostFilters(guildConfig),
       mode: normalizeAutopostMode(guildConfig.mode),
       guildId: guildConfig.guildId
+    };
+  }
+
+  describeDailyForecastConfig(guildConfig) {
+    return {
+      channelId: guildConfig.dailyForecastChannelId || null,
+      count: normalizeDailyForecastCount(guildConfig.dailyForecastCount),
+      guildId: guildConfig.guildId,
+      postTime: normalizeDailyForecastTime(guildConfig.dailyForecastTime)
     };
   }
 
@@ -562,7 +880,7 @@ class AutopostService {
   async ensureSchedulerRunning(context = {}) {
     await this.guildConfigStore.initialize();
 
-    if (!this.job) {
+    if (!this.job || !this.dailyForecastJob) {
       await this.start({
         ...context,
         recoveredFromMissingJob: true
@@ -599,9 +917,47 @@ class AutopostService {
     });
   }
 
+  attachDailyForecastJobListeners() {
+    if (!this.dailyForecastJob || typeof this.dailyForecastJob.on !== 'function') {
+      return;
+    }
+
+    this.dailyForecastJob.on('execution:missed', (executionContext) => {
+      this.logger.warn('daily_forecast.scheduler_missed_execution', {
+        ...buildSchedulerRunContext(executionContext),
+        nextScheduledAt: this.getNextDailyForecastScheduledAt()
+      });
+    });
+
+    this.dailyForecastJob.on('execution:overlap', (executionContext) => {
+      this.logger.warn('daily_forecast.scheduler_overlap', {
+        ...buildSchedulerRunContext(executionContext),
+        nextScheduledAt: this.getNextDailyForecastScheduledAt()
+      });
+    });
+
+    this.dailyForecastJob.on('execution:failed', (executionContext) => {
+      const error =
+        executionContext?.execution?.error || new Error('Daily forecast scheduler execution failed.');
+
+      this.logger.error('daily_forecast.scheduler_execution_failed', error, {
+        ...buildSchedulerRunContext(executionContext),
+        nextScheduledAt: this.getNextDailyForecastScheduledAt()
+      });
+    });
+  }
+
   safeCountEnabledGuilds() {
     try {
       return this.guildConfigStore.listEnabledGuildConfigs().length;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  safeCountEnabledDailyForecastGuilds() {
+    try {
+      return this.guildConfigStore.listEnabledDailyForecastConfigs().length;
     } catch (error) {
       return null;
     }
@@ -613,6 +969,14 @@ class AutopostService {
     }
 
     return normalizeLogTimestamp(this.job.getNextRun());
+  }
+
+  getNextDailyForecastScheduledAt() {
+    if (!this.dailyForecastJob || typeof this.dailyForecastJob.getNextRun !== 'function') {
+      return null;
+    }
+
+    return normalizeLogTimestamp(this.dailyForecastJob.getNextRun());
   }
 
   getJobStatus() {
@@ -627,9 +991,26 @@ class AutopostService {
     return 'scheduled';
   }
 
+  getDailyForecastJobStatus() {
+    if (!this.dailyForecastJob) {
+      return 'stopped';
+    }
+
+    if (typeof this.dailyForecastJob.getStatus === 'function') {
+      return this.dailyForecastJob.getStatus();
+    }
+
+    return 'scheduled';
+  }
+
   logSchedulerState(message, context = {}) {
     this.logger.info(message, {
       cronExpression: this.cronExpression,
+      dailyForecastCronExpression: this.dailyForecastCronExpression,
+      dailyForecastEnabledGuildCount: this.safeCountEnabledDailyForecastGuilds(),
+      dailyForecastJobStatus: this.getDailyForecastJobStatus(),
+      dailyForecastNextScheduledAt: this.getNextDailyForecastScheduledAt(),
+      dailyForecastTimezone: this.dailyForecastTimezone,
       enabledGuildCount: this.safeCountEnabledGuilds(),
       jobStatus: this.getJobStatus(),
       nextScheduledAt: this.getNextScheduledAt(),
@@ -657,6 +1038,37 @@ function buildRunLogContext(runContext = {}) {
     scheduledFor: normalizeLogTimestamp(runContext.scheduledFor),
     triggeredAt: normalizeLogTimestamp(runContext.triggeredAt)
   };
+}
+
+function resolveRunDate(runContext = {}) {
+  const candidates = [
+    runContext.now,
+    runContext.scheduledFor,
+    runContext.triggeredAt
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeDate(candidate);
+
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return new Date();
+}
+
+function normalizeDate(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function normalizeLogTimestamp(value) {

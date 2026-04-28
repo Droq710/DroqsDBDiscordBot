@@ -53,27 +53,67 @@ function createGuildConfig(overrides = {}) {
     mode: AUTOPOST_MODES.FULL_BREAKDOWN,
     countries: [],
     categories: [],
+    dailyForecastEnabled: false,
+    dailyForecastChannelId: null,
+    dailyForecastTime: '08:00',
+    dailyForecastCount: 10,
+    dailyForecastLastPostDate: null,
     ...overrides
   };
 }
 
 function createGuildConfigStore(guildConfig) {
+  let storedGuildConfig = guildConfig;
+
   return {
     async initialize() {},
     getGuildConfig() {
-      return guildConfig;
+      return storedGuildConfig;
     },
     listEnabledGuildConfigs() {
-      return [guildConfig];
+      return storedGuildConfig.autopostEnabled ? [storedGuildConfig] : [];
     },
-    saveGuildAutopostConfig() {
-      return guildConfig;
+    listEnabledDailyForecastConfigs() {
+      return storedGuildConfig.dailyForecastEnabled ? [storedGuildConfig] : [];
+    },
+    saveGuildAutopostConfig(config) {
+      storedGuildConfig = {
+        ...storedGuildConfig,
+        ...config,
+        autopostEnabled: true
+      };
+      return storedGuildConfig;
     },
     disableGuildAutopost() {
-      return {
-        ...guildConfig,
+      storedGuildConfig = {
+        ...storedGuildConfig,
         autopostEnabled: false
       };
+      return storedGuildConfig;
+    },
+    saveGuildDailyForecastConfig(config) {
+      storedGuildConfig = {
+        ...storedGuildConfig,
+        dailyForecastEnabled: true,
+        dailyForecastChannelId: config.channelId,
+        dailyForecastTime: config.time,
+        dailyForecastCount: config.count
+      };
+      return storedGuildConfig;
+    },
+    disableGuildDailyForecast() {
+      storedGuildConfig = {
+        ...storedGuildConfig,
+        dailyForecastEnabled: false
+      };
+      return storedGuildConfig;
+    },
+    markDailyForecastPosted({ dateKey }) {
+      storedGuildConfig = {
+        ...storedGuildConfig,
+        dailyForecastLastPostDate: dateKey
+      };
+      return storedGuildConfig;
     },
     close() {}
   };
@@ -170,6 +210,151 @@ test(
   );
   }
 );
+
+test(
+  'daily forecast scheduler posts only when a guild is due at its configured TCT time',
+  { concurrency: false },
+  async () => {
+  const logger = createLoggerSpy();
+  const sentPayloads = [];
+  const guildConfig = createGuildConfig({
+    autopostEnabled: false,
+    dailyForecastEnabled: true,
+    dailyForecastChannelId: 'channel-1',
+    dailyForecastTime: '08:00',
+    dailyForecastCount: 2
+  });
+  const store = createGuildConfigStore(guildConfig);
+  const channel = createSendableChannel({
+    async sendImpl(payload) {
+      sentPayloads.push(payload);
+      return payload;
+    }
+  });
+  const droqsdbClient = {
+    requestTimeoutMs: 30_000,
+    webBaseUrl: 'https://droqsdb.example',
+    async getDailyForecast() {
+      return {
+        generatedAt: '2026-04-28T08:00:00.000Z',
+        apiPath: '/api/public/v1/daily-forecast',
+        horizonHours: 24,
+        items: [
+          createForecastItem('Xanax', 'Japan'),
+          createForecastItem('Combat Helmet', 'South Africa')
+        ]
+      };
+    }
+  };
+  const service = new AutopostService({
+    discordClient: createDiscordClient(channel),
+    droqsdbClient,
+    guildConfigStore: store,
+    cronExpression: '0 * * * *',
+    timezone: 'America/Chicago',
+    logger
+  });
+
+  await service.postDailyForecasts({
+    scheduledFor: '2026-04-28T07:59:00.000Z',
+    triggeredAt: '2026-04-28T07:59:01.000Z'
+  });
+  await service.postDailyForecasts({
+    scheduledFor: '2026-04-28T08:00:00.000Z',
+    triggeredAt: '2026-04-28T08:00:01.000Z'
+  });
+  await service.postDailyForecasts({
+    scheduledFor: '2026-04-28T08:01:00.000Z',
+    triggeredAt: '2026-04-28T08:01:01.000Z'
+  });
+
+  assert.equal(sentPayloads.length, 1);
+  assert.equal(sentPayloads[0].embeds.length, 1);
+  assert.equal(store.getGuildConfig('guild-1').dailyForecastLastPostDate, '2026-04-28');
+  assert.equal(
+    logger.entries.some((entry) => entry.message === 'daily_forecast.posted'),
+    true
+  );
+  }
+);
+
+test(
+  'daily forecast API failures are logged and skipped without posting or crashing',
+  { concurrency: false },
+  async () => {
+  const logger = createLoggerSpy();
+  const sentPayloads = [];
+  const guildConfig = createGuildConfig({
+    autopostEnabled: false,
+    dailyForecastEnabled: true,
+    dailyForecastChannelId: 'channel-1',
+    dailyForecastTime: '08:00'
+  });
+  const store = createGuildConfigStore(guildConfig);
+  const channel = createSendableChannel({
+    async sendImpl(payload) {
+      sentPayloads.push(payload);
+      return payload;
+    }
+  });
+  const apiError = new DroqsDbApiError('Daily forecast is unavailable.', {
+    status: 500,
+    code: 'API_ERROR',
+    retryable: false
+  });
+  const service = new AutopostService({
+    discordClient: createDiscordClient(channel),
+    droqsdbClient: {
+      requestTimeoutMs: 30_000,
+      webBaseUrl: 'https://droqsdb.example',
+      async getDailyForecast() {
+        throw apiError;
+      }
+    },
+    guildConfigStore: store,
+    cronExpression: '0 * * * *',
+    timezone: 'America/Chicago',
+    logger
+  });
+
+  await assert.doesNotReject(() =>
+    service.postDailyForecastForGuild(guildConfig, {
+      scheduledFor: '2026-04-28T08:00:00.000Z',
+      triggeredAt: '2026-04-28T08:00:01.000Z'
+    })
+  );
+
+  assert.equal(sentPayloads.length, 0);
+  assert.equal(store.getGuildConfig('guild-1').dailyForecastLastPostDate, null);
+  assert.equal(
+    logger.entries.some((entry) => entry.message === 'daily_forecast.fetch_failed_final'),
+    true
+  );
+  }
+);
+
+function createForecastItem(itemName, country, overrides = {}) {
+  return {
+    itemName,
+    country,
+    profitPerItem: 123456,
+    profitPerMinute: 1234,
+    confidence: 'high',
+    confidencePercent: 88,
+    bestSafetyMarginMinutes: 20,
+    flyOutWindows: [
+      {
+        leaveAt: '2026-04-28T08:30:00.000Z',
+        leaveAtTct: '08:30 TCT',
+        leaveWindowEndAt: '2026-04-28T09:30:00.000Z',
+        leaveWindowEndAtTct: '09:30 TCT',
+        availability: 'projected_on_arrival',
+        reason: 'Predicted restock before arrival with sufficient learned stock window.'
+      }
+    ],
+    ...overrides
+  };
+}
 
 test(
   'autopost retries one timeout and then posts the fallback message',

@@ -8,6 +8,8 @@ const {
 
 const COMPANION_TRAVEL_PLANNER_QUERY_PATH = '/api/companion/v1/travel-planner/query';
 const DEFAULT_DROQSDB_API_TIMEOUT_MS = 30_000;
+const DAILY_FORECAST_CACHE_TTL_MS = 60_000;
+const DAILY_FORECAST_STALE_TTL_MS = 10 * 60_000;
 const DEFAULT_TRAVEL_PLANNER_RESULT_LIMIT = 10;
 const MAX_TRAVEL_PLANNER_RESULT_LIMIT = 100;
 const DEFAULT_COMPANION_TRAVEL_PLANNER_SETTINGS = Object.freeze({
@@ -268,6 +270,20 @@ class DroqsDbClient {
       runCount: normalizePositiveInteger(payload.runCount, 0),
       runs: normalizePublicRunArray(payload.runs),
       emptyStateGuidance: normalizeEmptyStateGuidance(payload?.emptyStateGuidance)
+    };
+  }
+
+  async getDailyForecast() {
+    const payload = await this.requestJson('daily-forecast', {
+      ttlMs: Math.max(this.defaultTtlMs, DAILY_FORECAST_CACHE_TTL_MS),
+      staleTtlMs: Math.max(this.defaultStaleTtlMs, DAILY_FORECAST_STALE_TTL_MS)
+    });
+
+    return {
+      ...payload,
+      apiPath: this.buildApiPath('daily-forecast'),
+      items: normalizeDailyForecastItemArray(payload?.items),
+      warnings: Array.isArray(payload?.warnings) ? payload.warnings : []
     };
   }
 
@@ -1177,6 +1193,87 @@ function normalizeEmptyStateGuidance(guidance) {
   };
 }
 
+function normalizeDailyForecastItemArray(items) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+
+  return items.map((item) => normalizeDailyForecastItem(item)).filter(Boolean);
+}
+
+function normalizeDailyForecastItem(item) {
+  if (!item || typeof item !== 'object') {
+    return null;
+  }
+
+  const itemName = cleanString(item.itemName);
+  const country = cleanString(item.country);
+
+  if (!itemName || !country) {
+    return null;
+  }
+
+  return {
+    ...item,
+    rank: normalizePositiveInteger(item.rank, null),
+    itemName,
+    country,
+    category: cleanString(item.category),
+    shopCategory: cleanString(item.shopCategory),
+    profitPerItem: toMetric(item.profitPerItem),
+    profitPerMinute: toMetric(item.profitPerMinute),
+    buyPrice: toMetric(item.buyPrice),
+    sellPrice: toMetric(item.sellPrice),
+    marketValue: toMetric(item.marketValue),
+    bazaarPrice: toMetric(item.bazaarPrice),
+    tornCityShops: toMetric(item.tornCityShops),
+    currentStock: toMetric(item.currentStock),
+    source: cleanString(item.source),
+    sourceUpdatedAt: cleanString(item.sourceUpdatedAt),
+    confidence: normalizeText(item.confidence) || null,
+    confidenceScore: toMetric(item.confidenceScore),
+    confidencePercent: toMetric(item.confidencePercent),
+    bestSafetyMarginMinutes: toMetric(item.bestSafetyMarginMinutes),
+    forecastSummary: cleanString(item.forecastSummary),
+    flyOutWindows: normalizeDailyForecastWindows(item.flyOutWindows)
+  };
+}
+
+function normalizeDailyForecastWindows(windows) {
+  if (!Array.isArray(windows)) {
+    return [];
+  }
+
+  return windows.map((window) => normalizeDailyForecastWindow(window)).filter(Boolean);
+}
+
+function normalizeDailyForecastWindow(window) {
+  if (!window || typeof window !== 'object') {
+    return null;
+  }
+
+  return {
+    ...window,
+    leaveAt: cleanString(window.leaveAt),
+    leaveAtTct: cleanString(window.leaveAtTct),
+    leaveWindowEndAt: cleanString(window.leaveWindowEndAt),
+    leaveWindowEndAtTct: cleanString(window.leaveWindowEndAtTct),
+    arrivalAt: cleanString(window.arrivalAt),
+    arrivalAtTct: cleanString(window.arrivalAtTct),
+    availabilityStartsAt: cleanString(window.availabilityStartsAt),
+    availabilityEndsAt: cleanString(window.availabilityEndsAt),
+    reason: cleanString(window.reason),
+    availability: normalizeText(window.availability) || null,
+    confidence: normalizeText(window.confidence) || null,
+    confidenceScore: toMetric(window.confidenceScore),
+    confidencePercent: toMetric(window.confidencePercent),
+    safetyMarginMinutes: toMetric(window.safetyMarginMinutes),
+    minimumSafetyMarginMinutes: toMetric(window.minimumSafetyMarginMinutes),
+    tightWindow: window.tightWindow === true,
+    windowDurationMinutes: toMetric(window.windowDurationMinutes)
+  };
+}
+
 function normalizePublicRunArray(runs) {
   if (!Array.isArray(runs)) {
     return null;
@@ -1311,6 +1408,10 @@ function splitRunsForDisplay(runs) {
 function toMetric(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
+}
+
+function cleanString(value) {
+  return String(value || '').trim() || null;
 }
 
 function buildRunKey(run) {
