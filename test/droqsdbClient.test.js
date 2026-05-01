@@ -163,6 +163,94 @@ test('travel planner queries use the bot fixed 19/private profile by default', a
   assert.equal(requestBody.limit, 2);
 });
 
+test('alert preview queries use companion endpoint with personalized settings', async () => {
+  const client = new DroqsDbClient({
+    baseUrl: 'https://api.example.test',
+    webBaseUrl: 'https://droqsdb.example.test',
+    cache: createCache(),
+    logger: createLogger()
+  });
+  let capturedRequest = null;
+
+  client.requestJson = async (pathname, options) => {
+    capturedRequest = {
+      pathname,
+      options
+    };
+
+    return {
+      ok: true,
+      mode: 'flyout',
+      shouldNotifyNow: true,
+      notificationLines: ['Leave now.']
+    };
+  };
+
+  const payload = await client.queryAlertPreview({
+    item: 'Xanax',
+    country: 'Japan',
+    mode: 'flyout',
+    flightType: 'airstrip',
+    capacity: 29,
+    sellTarget: 'bazaar',
+    marketTax: false
+  });
+  const requestBody = JSON.parse(capturedRequest.options.body);
+
+  assert.equal(capturedRequest.pathname, '/api/companion/v1/alert-preview/query');
+  assert.equal(capturedRequest.options.method, 'POST');
+  assert.equal(capturedRequest.options.urlOverride, 'https://droqsdb.example.test/api/companion/v1/alert-preview/query');
+  assert.deepEqual(requestBody, {
+    country: 'Japan',
+    item: 'Xanax',
+    mode: 'flyout',
+    flightType: 'airstrip',
+    capacity: 29,
+    sellTarget: 'bazaar',
+    marketTax: false
+  });
+  assert.equal(payload.apiPath, '/api/companion/v1/alert-preview/query');
+  assert.deepEqual(payload.notificationLines, ['Leave now.']);
+});
+
+test('alert preview queries use bot fixed travel profile by default', async () => {
+  const client = new DroqsDbClient({
+    baseUrl: 'https://api.example.test',
+    webBaseUrl: 'https://droqsdb.example.test',
+    cache: createCache(),
+    logger: createLogger()
+  });
+  let capturedRequest = null;
+
+  client.requestJson = async (pathname, options) => {
+    capturedRequest = {
+      pathname,
+      options
+    };
+
+    return {
+      ok: true,
+      shouldNotifyNow: false
+    };
+  };
+
+  await client.queryAlertPreview({
+    item: 'Xanax',
+    country: 'Japan',
+    mode: 'available'
+  });
+
+  assert.deepEqual(JSON.parse(capturedRequest.options.body), {
+    country: 'Japan',
+    item: 'Xanax',
+    mode: 'available',
+    flightType: 'private',
+    capacity: 19,
+    sellTarget: 'market',
+    marketTax: true
+  });
+});
+
 test('daily forecast lookup uses the public daily-forecast endpoint and normalizes items', async () => {
   const client = new DroqsDbClient({
     baseUrl: 'https://droqsdb.example.test/api/public/v1',

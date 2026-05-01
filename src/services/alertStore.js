@@ -44,6 +44,8 @@ class AlertStore {
         mode TEXT NOT NULL,
         flight_type TEXT,
         capacity INTEGER,
+        sell_target TEXT,
+        market_tax INTEGER,
         note TEXT,
         status TEXT NOT NULL DEFAULT 'active',
         repeat_mode TEXT NOT NULL DEFAULT 'once',
@@ -94,6 +96,8 @@ class AlertStore {
     repeatMode = ALERT_REPEAT_ONCE,
     flightType = null,
     capacity = null,
+    sellTarget = null,
+    marketTax = null,
     note = null,
     lastConditionState = null,
     lastConditionChangedAt = null
@@ -110,6 +114,8 @@ class AlertStore {
       repeatMode: normalizeAlertRepeatMode(repeatMode),
       flightType: normalizeFlightType(flightType),
       capacity: normalizeCapacity(capacity),
+      sellTarget: normalizeSellTarget(sellTarget),
+      marketTax: serializeMarketTax(marketTax),
       note: normalizeNote(note),
       createdAt: now,
       updatedAt: now,
@@ -256,6 +262,8 @@ class AlertStore {
           repeat_mode,
           flight_type,
           capacity,
+          sell_target,
+          market_tax,
           note,
           status,
           created_at,
@@ -272,6 +280,8 @@ class AlertStore {
           @repeatMode,
           @flightType,
           @capacity,
+          @sellTarget,
+          @marketTax,
           @note,
           'active',
           @createdAt,
@@ -405,6 +415,34 @@ class AlertStore {
         ADD COLUMN last_condition_changed_at TEXT
       `);
     }
+
+    if (!columns.has('flight_type')) {
+      this.db.exec(`
+        ALTER TABLE alerts
+        ADD COLUMN flight_type TEXT
+      `);
+    }
+
+    if (!columns.has('capacity')) {
+      this.db.exec(`
+        ALTER TABLE alerts
+        ADD COLUMN capacity INTEGER
+      `);
+    }
+
+    if (!columns.has('sell_target')) {
+      this.db.exec(`
+        ALTER TABLE alerts
+        ADD COLUMN sell_target TEXT
+      `);
+    }
+
+    if (!columns.has('market_tax')) {
+      this.db.exec(`
+        ALTER TABLE alerts
+        ADD COLUMN market_tax INTEGER
+      `);
+    }
   }
 
   requireStatements() {
@@ -428,6 +466,8 @@ function mapAlertRow(row) {
     repeatMode: normalizeAlertRepeatMode(row.repeat_mode),
     flightType: normalizeFlightType(row.flight_type),
     capacity: normalizeCapacity(row.capacity),
+    sellTarget: normalizeSellTarget(row.sell_target),
+    marketTax: normalizeMarketTax(row.market_tax),
     note: normalizeNote(row.note),
     status: row.status || ALERT_STATUS_ACTIVE,
     disabledReason: row.disabled_reason || null,
@@ -501,6 +541,49 @@ function normalizeCapacity(value) {
 
   const numeric = Number.parseInt(value, 10);
   return Number.isInteger(numeric) && numeric > 0 ? numeric : null;
+}
+
+function normalizeSellTarget(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['market', 'bazaar', 'torn'].includes(normalized) ? normalized : null;
+}
+
+function normalizeMarketTax(value) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    if (value === 1) {
+      return true;
+    }
+
+    if (value === 0) {
+      return false;
+    }
+  }
+
+  const normalized = String(value || '').trim().toLowerCase();
+
+  if (['true', '1', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+
+  if (['false', '0', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+
+  return null;
+}
+
+function serializeMarketTax(value) {
+  const normalized = normalizeMarketTax(value);
+
+  if (normalized === null) {
+    return null;
+  }
+
+  return normalized ? 1 : 0;
 }
 
 function normalizeNote(value) {

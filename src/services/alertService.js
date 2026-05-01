@@ -7,6 +7,13 @@ const {
 } = require('./alertStore');
 
 const DEFAULT_ALERT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const DISCORD_MESSAGE_LIMIT = 2000;
+const DEFAULT_ALERT_PREVIEW_SETTINGS = Object.freeze({
+  flightType: 'private',
+  capacity: 19,
+  sellTarget: 'market',
+  marketTax: true
+});
 
 class AlertService {
   constructor({
@@ -136,11 +143,15 @@ class AlertService {
   }
 
   async evaluateAlert(alert, cache) {
-    if (alert.mode === ALERT_MODE_FLYOUT) {
-      return this.evaluateFlyoutAlert(alert, cache);
-    }
+    const preview = await this.getAlertPreviewCached(alert, cache);
+    const conditionActive = resolveAlertPreviewCondition(preview);
 
-    return this.evaluateAvailableAlert(alert, cache);
+    return {
+      conditionActive,
+      shouldNotify: conditionActive,
+      message: buildAlertPreviewMessage(alert, preview),
+      preview
+    };
   }
 
   shouldNotifyAlert(alert, result) {
@@ -177,191 +188,307 @@ class AlertService {
     });
   }
 
-  async evaluateAvailableAlert(alert, cache) {
-    const snapshot = await this.getItemCountrySnapshotCached(alert, cache);
-    const stock = Number(snapshot.countryRow?.stock);
-    const isAvailable = Number.isFinite(stock) && stock > 0;
-
-    return {
-      conditionActive: isAvailable,
-      shouldNotify: isAvailable,
-      message: buildAvailableAlertMessage(alert, snapshot),
-      snapshot
-    };
-  }
-
-  async evaluateFlyoutAlert(alert, cache) {
-    const planner = await this.getPlannerSnapshotCached(alert, cache);
-    const run = findMatchingPlannerRun(planner.runs, alert);
-
-    if (!run) {
-      return {
-        conditionActive: false,
-        shouldNotify: false,
-        message: null,
-        planner
-      };
-    }
-
-    const departInMinutes = toNumber(run.departInMinutes);
-    const isProjectedViable =
-      run.isProjectedViable === true ||
-      String(run.availabilityState || '').trim().toLowerCase() === 'projected_on_arrival';
-    const isCurrentlyInStock =
-      run.isCurrentlyInStock === true || toNumber(run.stock) > 0;
-    const shouldNotify = isCurrentlyInStock || (isProjectedViable && departInMinutes !== null && departInMinutes <= 0);
-
-    return {
-      conditionActive: shouldNotify,
-      shouldNotify,
-      message: buildFlyoutAlertMessage(alert, run),
-      planner,
-      run
-    };
-  }
-
-  async getItemCountrySnapshotCached(alert, cache) {
-    const key = `snapshot:${normalizeKey(alert.itemName)}:${normalizeKey(alert.country)}`;
-
-    if (!cache.has(key)) {
-      cache.set(key, this.droqsdbClient.getItemCountrySnapshot(alert.itemName, alert.country));
-    }
-
-    return cache.get(key);
-  }
-
-  async getPlannerSnapshotCached(alert, cache) {
-    const settings = buildPlannerSettings(alert);
+  async getAlertPreviewCached(alert, cache) {
+    const request = this.buildAlertPreviewRequest(alert);
     const key = [
-      'planner',
-      normalizeKey(alert.itemName),
-      normalizeKey(alert.country),
-      normalizeKey(settings.flightType),
-      settings.capacity || ''
+      'alert-preview',
+      normalizeKey(request.item),
+      normalizeKey(request.country),
+      normalizeKey(request.mode),
+      normalizeKey(request.flightType),
+      request.capacity || '',
+      normalizeKey(request.sellTarget),
+      request.marketTax === false ? 'no_tax' : 'tax'
     ].join(':');
 
     if (!cache.has(key)) {
-      cache.set(
-        key,
-        this.droqsdbClient.queryTravelPlanner({
-          countries: [alert.country],
-          itemNames: [alert.itemName],
-          limit: 10,
-          settings
-        })
-      );
+      cache.set(key, this.droqsdbClient.queryAlertPreview(request));
     }
 
     return cache.get(key);
   }
 
+  buildAlertPreviewRequest(alert) {
+    const settings = this.resolveAlertPreviewSettings(alert);
+
+    return {
+      item: alert.itemName,
+      country: alert.country,
+      mode: alert.mode === ALERT_MODE_FLYOUT ? ALERT_MODE_FLYOUT : ALERT_MODE_AVAILABLE,
+      flightType: settings.flightType,
+      capacity: settings.capacity,
+      sellTarget: settings.sellTarget,
+      marketTax: settings.marketTax
+    };
+  }
+
+  resolveAlertPreviewSettings(alert) {
+    const overrides = {
+      flightType: alert.flightType || undefined,
+      capacity: alert.capacity || undefined,
+      sellTarget: alert.sellTarget || undefined,
+      marketTax: typeof alert.marketTax === 'boolean' ? alert.marketTax : undefined
+    };
+
+    if (typeof this.droqsdbClient.getBotAlertPreviewSettings === 'function') {
+      return this.droqsdbClient.getBotAlertPreviewSettings(overrides);
+    }
+
+    return {
+      ...DEFAULT_ALERT_PREVIEW_SETTINGS,
+      ...(overrides.flightType ? { flightType: overrides.flightType } : {}),
+      ...(overrides.capacity ? { capacity: overrides.capacity } : {}),
+      ...(overrides.sellTarget ? { sellTarget: overrides.sellTarget } : {}),
+      ...(typeof overrides.marketTax === 'boolean' ? { marketTax: overrides.marketTax } : {})
+    };
+  }
+
   async sendAlertNotification(alert, result) {
-    let channel;
+    let user;
 
     try {
-      channel = await this.discordClient.channels.fetch(alert.channelId);
+      user = await this.discordClient.users.fetch(alert.userId);
     } catch (error) {
-      this.logger.warn('alerts.channel_fetch_failed', error, {
+      this.logger.warn('alerts.dm_user_fetch_failed', error, {
         alertId: alert.id,
-        channelId: alert.channelId,
-        guildId: alert.guildId
-      });
-      this.alertStore.markAlertSendFailed({
-        id: alert.id,
-        reason: 'channel_fetch_failed'
-      });
-      return false;
-    }
-
-    if (!channel || !channel.isTextBased?.() || typeof channel.send !== 'function') {
-      this.logger.warn('alerts.channel_unavailable', {
-        alertId: alert.id,
-        channelId: alert.channelId,
-        guildId: alert.guildId
-      });
-      this.alertStore.markAlertSendFailed({
-        id: alert.id,
-        reason: 'channel_unavailable'
-      });
-      return false;
-    }
-
-    try {
-      await channel.send({
-        content: result.message,
-        allowedMentions: {
-          parse: [],
-          users: [alert.userId]
-        }
-      });
-      return true;
-    } catch (error) {
-      this.logger.warn('alerts.notification_send_failed', error, {
-        alertId: alert.id,
-        channelId: alert.channelId,
         guildId: alert.guildId,
         userId: alert.userId
       });
       this.alertStore.markAlertSendFailed({
         id: alert.id,
-        reason: 'notification_send_failed'
+        reason: 'dm_user_fetch_failed'
+      });
+      return false;
+    }
+
+    if (!user || typeof user.send !== 'function') {
+      this.logger.warn('alerts.dm_user_unavailable', {
+        alertId: alert.id,
+        guildId: alert.guildId,
+        userId: alert.userId
+      });
+      this.alertStore.markAlertSendFailed({
+        id: alert.id,
+        reason: 'dm_user_unavailable'
+      });
+      return false;
+    }
+
+    try {
+      await user.send({
+        content: limitDiscordMessage(result.message),
+        allowedMentions: {
+          parse: []
+        }
+      });
+      return true;
+    } catch (error) {
+      this.logger.warn('alerts.dm_send_failed', error, {
+        alertId: alert.id,
+        guildId: alert.guildId,
+        userId: alert.userId
+      });
+      this.alertStore.markAlertSendFailed({
+        id: alert.id,
+        reason: 'dm_failed'
       });
       return false;
     }
   }
 }
 
-function buildPlannerSettings(alert) {
-  const settings = {};
-
-  if (alert.flightType) {
-    settings.flightType = alert.flightType;
+function resolveAlertPreviewCondition(preview) {
+  if (typeof preview?.shouldNotifyNow === 'boolean') {
+    return preview.shouldNotifyNow;
   }
 
-  if (alert.capacity) {
-    settings.capacity = alert.capacity;
+  if (typeof preview?.shouldNotify === 'boolean') {
+    return preview.shouldNotify;
   }
 
-  return settings;
+  if (typeof preview?.isConditionMet === 'boolean') {
+    return preview.isConditionMet;
+  }
+
+  return false;
 }
 
-function buildAvailableAlertMessage(alert, snapshot) {
-  const parts = [
-    `<@${alert.userId}> Alert: ${alert.itemName} is available in ${alert.country} right now.`
+function buildAlertPreviewMessage(alert, preview) {
+  const mode = preview?.mode === ALERT_MODE_FLYOUT || alert.mode === ALERT_MODE_FLYOUT
+    ? ALERT_MODE_FLYOUT
+    : ALERT_MODE_AVAILABLE;
+  const itemName = cleanText(preview?.itemName || alert.itemName || 'Item');
+  const country = cleanText(preview?.country || alert.country || 'Unknown country');
+  const capacity = toNumber(preview?.capacity ?? alert.capacity);
+  const buyPrice = toNumber(preview?.buyPrice ?? preview?.itemBuyPrice);
+  const totalRunCost =
+    toNumber(preview?.totalRunCost ?? preview?.estimatedRunCost) ||
+    (buyPrice !== null && capacity !== null ? buyPrice * capacity : null);
+  const currentStock = toNumber(preview?.currentStock ?? preview?.stock);
+  const flightType = cleanText(preview?.flightType || alert.flightType);
+  const flightLength = cleanText(preview?.flightLengthLabel) ||
+    (toNumber(preview?.flightLengthMinutes) !== null
+      ? formatDurationMinutes(preview.flightLengthMinutes)
+      : null);
+  const arrivalAtTct = cleanText(preview?.arrivalAtTct);
+  const restockWindow = getWindowLabel(preview?.restockWindow) ||
+    cleanText(preview?.restockWindowLabel);
+  const stockoutWindow = getWindowLabel(preview?.stockoutWindow) ||
+    cleanText(preview?.stockoutWindowLabel) ||
+    cleanText(preview?.estimatedStockoutAtTct) ||
+    cleanText(preview?.stockoutAtTct);
+  const safetyWindow = getWindowLabel(preview?.safetyWindow) ||
+    cleanText(preview?.safetyWindowLabel);
+  const confidence = cleanText(preview?.confidence);
+  const freshness = cleanText(preview?.snapshotFreshness || preview?.dataState);
+  const predictionReason = cleanText(preview?.predictionReason || preview?.reason);
+  const lines = [
+    `\u{1F6A8} DroqsDB ${mode === ALERT_MODE_FLYOUT ? 'Fly-out' : 'Stock'} Alert`,
+    '',
+    mode === ALERT_MODE_FLYOUT
+      ? `${itemName} - ${country}`
+      : `${itemName} - ${country} is available now.`,
+    ''
   ];
-  const stock = toNumber(snapshot?.countryRow?.stock);
 
-  if (stock !== null) {
-    parts.push(`Stock: ${formatCount(stock)}.`);
+  if (mode === ALERT_MODE_FLYOUT) {
+    lines.push(`Leave now if you want ${itemName} to be in stock on arrival.`);
+    lines.push('');
   }
 
-  return parts.join(' ');
+  if (currentStock !== null) {
+    lines.push(`Stock: ${formatCount(currentStock)}`);
+  }
+
+  if (buyPrice !== null) {
+    lines.push(`Buy price: ${formatMoney(buyPrice)}`);
+  }
+
+  if (capacity !== null) {
+    lines.push(`Capacity: ${formatCount(capacity)}`);
+  }
+
+  if (totalRunCost !== null) {
+    lines.push(`Estimated run cost: ${formatMoney(totalRunCost)}`);
+  }
+
+  if (flightType || flightLength) {
+    const flightParts = [
+      flightType ? formatFlightTypeLabel(flightType) : null,
+      flightLength ? `~${flightLength}` : null
+    ].filter(Boolean);
+    lines.push(`Flight: ${flightParts.join(', ')}`);
+  }
+
+  if (mode === ALERT_MODE_FLYOUT && arrivalAtTct) {
+    lines.push(`Arrival: ${arrivalAtTct}`);
+  }
+
+  if (restockWindow) {
+    lines.push(`Restock window: ${restockWindow}`);
+  }
+
+  if (stockoutWindow) {
+    lines.push(`Estimated stockout: ${stockoutWindow}`);
+  }
+
+  if (safetyWindow) {
+    lines.push(`Safety window: ${safetyWindow}`);
+  }
+
+  if (confidence) {
+    lines.push(`Confidence: ${formatTitleLabel(confidence)}`);
+  }
+
+  lines.push(`Source: DroqsDB${freshness ? `, ${freshness}` : ''}`);
+
+  if (predictionReason) {
+    lines.push('', `Reason: ${predictionReason}`);
+  }
+
+  const apiLines = normalizeNotificationLines(preview?.notificationLines)
+    .filter((line) => !lineAlreadyIncluded(lines, line))
+    .slice(0, 6);
+
+  if (apiLines.length) {
+    lines.push('', ...apiLines);
+  }
+
+  lines.push('', 'Forecasts are estimates, not guarantees.');
+
+  return sanitizeDiscordText(lines.join('\n').replace(/\n{3,}/g, '\n\n'));
 }
 
-function buildFlyoutAlertMessage(alert, run) {
-  const parts = [
-    `<@${alert.userId}> Fly-out alert: Leave for ${alert.country} now if you want ${alert.itemName} to be in stock on arrival.`
-  ];
-  const stock = toNumber(run?.stock);
-  const windowMinutes = toNumber(run?.availabilityWindowMinutes);
-
-  if (stock !== null) {
-    parts.push(`Stock: ${formatCount(stock)}.`);
+function getWindowLabel(value) {
+  if (!value) {
+    return null;
   }
 
-  if (windowMinutes !== null) {
-    parts.push(`Window: ${formatDurationMinutes(windowMinutes)}.`);
+  if (typeof value === 'string') {
+    return cleanText(value);
   }
 
-  return parts.join(' ');
+  if (typeof value === 'object') {
+    return cleanText(value.label || value.windowLabel || value.description);
+  }
+
+  return null;
 }
 
-function findMatchingPlannerRun(runs, alert) {
-  return (Array.isArray(runs) ? runs : []).find(
-    (run) =>
-      normalizeKey(run?.itemName) === normalizeKey(alert.itemName) &&
-      normalizeKey(run?.country) === normalizeKey(alert.country)
-  ) || null;
+function normalizeNotificationLines(lines) {
+  return (Array.isArray(lines) ? lines : [])
+    .map(cleanText)
+    .filter(Boolean);
+}
+
+function lineAlreadyIncluded(lines, candidate) {
+  const normalizedCandidate = normalizeKey(candidate);
+  return lines.some((line) => normalizeKey(line) === normalizedCandidate);
+}
+
+function formatMoney(value) {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0
+  }).format(Number(value) || 0);
+}
+
+function formatFlightTypeLabel(value) {
+  const normalized = cleanText(value);
+
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatTitleLabel(value) {
+  return cleanText(value)
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function cleanText(value) {
+  const normalized = String(value || '').trim();
+  return normalized || null;
+}
+
+function sanitizeDiscordText(value) {
+  return String(value || '').replace(/@/g, '@\u200b');
+}
+
+function limitDiscordMessage(value) {
+  const normalized = String(value || '').trim();
+
+  if (normalized.length <= DISCORD_MESSAGE_LIMIT) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, DISCORD_MESSAGE_LIMIT - 20).trimEnd()}\n...`;
 }
 
 function normalizeKey(value) {

@@ -7,6 +7,7 @@ const {
 } = require('../constants/droqsdb');
 
 const COMPANION_TRAVEL_PLANNER_QUERY_PATH = '/api/companion/v1/travel-planner/query';
+const COMPANION_ALERT_PREVIEW_QUERY_PATH = '/api/companion/v1/alert-preview/query';
 const DEFAULT_DROQSDB_API_TIMEOUT_MS = 30_000;
 const DAILY_FORECAST_CACHE_TTL_MS = 60_000;
 const DAILY_FORECAST_STALE_TTL_MS = 10 * 60_000;
@@ -335,6 +336,45 @@ class DroqsDbClient {
     });
   }
 
+  getBotAlertPreviewSettings(overrides = null) {
+    const source = overrides && typeof overrides === 'object' ? overrides : {};
+    const travelOverrides = {};
+    const sellWhere = source.sellWhere ?? source.sellTarget;
+    const applyTax = source.applyTax ?? source.marketTax;
+
+    if (sellWhere !== undefined && sellWhere !== null) {
+      travelOverrides.sellWhere = sellWhere;
+    }
+
+    if (applyTax !== undefined && applyTax !== null) {
+      travelOverrides.applyTax = applyTax;
+    }
+
+    if (source.flightType !== undefined && source.flightType !== null) {
+      travelOverrides.flightType = source.flightType;
+    }
+
+    if (source.capacity !== undefined && source.capacity !== null) {
+      travelOverrides.capacity = source.capacity;
+    }
+
+    const travelSettings = this.getBotTravelPlannerSettings(travelOverrides);
+
+    return {
+      flightType: travelSettings.flightType,
+      capacity: travelSettings.capacity,
+      sellTarget:
+        normalizeSellTarget(source.sellTarget ?? source.sellWhere ?? travelSettings.sellWhere) ||
+        travelSettings.sellWhere,
+      marketTax:
+        typeof source.marketTax === 'boolean'
+          ? source.marketTax
+          : typeof source.applyTax === 'boolean'
+            ? source.applyTax
+            : travelSettings.applyTax
+    };
+  }
+
   async queryTravelPlanner({
     countries = [],
     categories = [],
@@ -373,6 +413,57 @@ class DroqsDbClient {
       emptyReason: String(payload?.emptyReason || '').trim() || null,
       emptyStateGuidance: normalizeEmptyStateGuidance(payload?.emptyStateGuidance)
     };
+  }
+
+  async queryAlertPreview({
+    country,
+    item,
+    itemName,
+    mode,
+    flightType = null,
+    capacity = null,
+    sellTarget = null,
+    marketTax = null
+  } = {}) {
+    const settings = this.getBotAlertPreviewSettings({
+      flightType,
+      capacity,
+      sellTarget,
+      marketTax
+    });
+    const requestBody = {
+      country: String(country || '').trim(),
+      item: String(item || itemName || '').trim(),
+      mode: normalizeAlertPreviewMode(mode),
+      flightType: settings.flightType,
+      capacity: settings.capacity,
+      sellTarget: settings.sellTarget,
+      marketTax: settings.marketTax
+    };
+
+    try {
+      const payload = await this.requestJson(COMPANION_ALERT_PREVIEW_QUERY_PATH, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody),
+        urlOverride: this.buildWebUrl(COMPANION_ALERT_PREVIEW_QUERY_PATH)
+      });
+
+      return {
+        ...payload,
+        apiPath: COMPANION_ALERT_PREVIEW_QUERY_PATH,
+        notificationLines: normalizeNotificationLines(payload?.notificationLines)
+      };
+    } catch (error) {
+      this.logger.warn('droqsdb.alert_preview.query_failed', error, {
+        country: requestBody.country,
+        itemName: requestBody.item,
+        mode: requestBody.mode
+      });
+      throw error;
+    }
   }
 
   async getRunEmptyStateGuidance({
@@ -1117,9 +1208,21 @@ function normalizeRoundTripHours(value) {
   return Math.max(0.5, Math.round(numeric * 2) / 2);
 }
 
+function normalizeAlertPreviewMode(value) {
+  const normalized = normalizeText(value);
+  return normalized === 'flyout' ? 'flyout' : 'available';
+}
+
 function normalizeSellTarget(value) {
   const normalized = normalizeText(value);
   return ['market', 'bazaar', 'torn'].includes(normalized) ? normalized : null;
+}
+
+function normalizeNotificationLines(lines) {
+  return (Array.isArray(lines) ? lines : [])
+    .map((line) => String(line || '').trim())
+    .filter(Boolean)
+    .slice(0, 12);
 }
 
 function normalizeTravelPlannerSettings(settings) {

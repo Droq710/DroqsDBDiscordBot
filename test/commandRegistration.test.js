@@ -24,3 +24,20 @@ test('autopost command registration includes daily forecast configuration option
     10
   );
 });
+
+test('alert command registration includes flight personalization options', () => {
+  const commands = buildCommands();
+  const alertCommand = commands.find((command) => command.name === 'alert');
+  const createSubcommand = alertCommand.options.find((option) => option.name === 'create');
+  const flightTypeOption = createSubcommand.options.find((option) => option.name === 'flight_type');
+  const capacityOption = createSubcommand.options.find((option) => option.name === 'capacity');
+
+  assert.ok(flightTypeOption);
+  assert.ok(capacityOption);
+  assert.deepEqual(
+    flightTypeOption.choices.map((choice) => choice.value),
+    ['standard', 'airstrip', 'private', 'business']
+  );
+  assert.equal(capacityOption.min_value, 1);
+  assert.equal(capacityOption.max_value, 100);
+});

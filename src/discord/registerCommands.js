@@ -42,8 +42,10 @@ const ALERT_REPEAT_CHOICES = Object.freeze([
   { name: 'Every time', value: 'every_time' }
 ]);
 const FLIGHT_TYPE_CHOICES = Object.freeze([
-  { name: 'Private', value: 'private' },
-  { name: 'Standard', value: 'standard' }
+  { name: 'Standard', value: 'standard' },
+  { name: 'Airstrip', value: 'airstrip' },
+  { name: 'WLT benefit (Private)', value: 'private' },
+  { name: 'Business Class', value: 'business' }
 ]);
 
 function withCountryChoices(option) {
@@ -243,13 +245,13 @@ function buildCommands() {
           .addStringOption((option) =>
             option
               .setName('flight_type')
-              .setDescription('Fly-out mode only. Defaults to the bot travel profile.')
+              .setDescription('Defaults to the bot travel profile.')
               .addChoices(...FLIGHT_TYPE_CHOICES)
           )
           .addIntegerOption((option) =>
             option
               .setName('capacity')
-              .setDescription('Fly-out mode only. Defaults to the bot travel profile.')
+              .setDescription('Travel capacity. Defaults to the bot travel profile.')
               .setMinValue(1)
               .setMaxValue(100)
           )

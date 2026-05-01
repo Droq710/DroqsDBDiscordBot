@@ -38,8 +38,13 @@ test('alert create stores an alert', async () => {
   assert.equal(createdPayload.country, 'Mexico');
   assert.equal(createdPayload.mode, 'available');
   assert.equal(createdPayload.repeatMode, 'once');
+  assert.equal(createdPayload.flightType, 'private');
+  assert.equal(createdPayload.capacity, 19);
+  assert.equal(createdPayload.sellTarget, 'market');
+  assert.equal(createdPayload.marketTax, true);
   assert.match(interaction.replyPayload.embeds[0].data.description, /ID: 7/);
   assert.match(interaction.replyPayload.embeds[0].data.description, /Repeat: Once/);
+  assert.match(interaction.replyPayload.embeds[0].data.description, /I will DM you once/);
 });
 
 test('alert create stores explicit one-time repeat mode', async () => {
@@ -110,6 +115,77 @@ test('alert create stores recurring repeat mode', async () => {
   assert.match(interaction.replyPayload.embeds[0].data.description, /every time it comes back in stock/);
 });
 
+test('alert create accepts flight type and capacity', async () => {
+  let createdPayload = null;
+  const interaction = createInteractionStub({
+    subcommand: 'create',
+    strings: {
+      item: 'xanax',
+      country: 'japan',
+      mode: 'flyout',
+      flight_type: 'airstrip'
+    },
+    integers: {
+      capacity: 29
+    }
+  });
+
+  await execute(interaction, {
+    alertService: {
+      countActiveAlertsForUser() {
+        return 0;
+      },
+      createAlert(payload) {
+        createdPayload = payload;
+        return {
+          id: 10,
+          ...payload
+        };
+      }
+    },
+    droqsdbClient: createDroqsdbClientStub({
+      country: 'Japan'
+    }),
+    logger: createSilentLogger()
+  });
+
+  assert.equal(createdPayload.flightType, 'airstrip');
+  assert.equal(createdPayload.capacity, 29);
+  assert.equal(createdPayload.sellTarget, 'market');
+  assert.equal(createdPayload.marketTax, true);
+  assert.match(interaction.replyPayload.embeds[0].data.description, /Flight: Airstrip/);
+  assert.match(interaction.replyPayload.embeds[0].data.description, /Capacity: 29/);
+  assert.match(interaction.replyPayload.embeds[0].data.description, /I will DM you/);
+});
+
+test('alert create validates capacity', async () => {
+  const interaction = createInteractionStub({
+    subcommand: 'create',
+    strings: {
+      item: 'xanax',
+      country: 'japan',
+      mode: 'flyout'
+    },
+    integers: {
+      capacity: 0
+    }
+  });
+
+  await assert.rejects(
+    () =>
+      execute(interaction, {
+        alertService: {
+          countActiveAlertsForUser() {
+            return 0;
+          }
+        },
+        droqsdbClient: createDroqsdbClientStub(),
+        logger: createSilentLogger()
+      }),
+    /Capacity must be a whole number/
+  );
+});
+
 test('alert list shows user alerts', async () => {
   const interaction = createInteractionStub({
     subcommand: 'list'
@@ -124,15 +200,18 @@ test('alert list shows user alerts', async () => {
             mode: 'available',
             repeatMode: 'every_time',
             itemName: 'Xanax',
-            country: 'Mexico'
+            country: 'Mexico',
+            flightType: 'airstrip',
+            capacity: 29
           }
         ];
       }
     },
+    droqsdbClient: createDroqsdbClientStub(),
     logger: createSilentLogger()
   });
 
-  assert.match(interaction.replyPayload.embeds[0].data.description, /#4 - Xanax \/ Mexico - Available - Every time/);
+  assert.match(interaction.replyPayload.embeds[0].data.description, /#4 \/ Xanax \/ Mexico \/ Available \/ Every time \/ Airstrip \/ Cap 29/);
 });
 
 test('alert remove disables the requested alert', async () => {
@@ -159,7 +238,7 @@ test('alert remove disables the requested alert', async () => {
   assert.match(interaction.replyPayload.embeds[0].data.description, /Alert 4 has been removed/);
 });
 
-test('alert flyout create rejects when no planner client is available', async () => {
+test('alert create rejects when no alert preview client is available', async () => {
   const interaction = createInteractionStub({
     subcommand: 'create',
     strings: {
@@ -182,7 +261,7 @@ test('alert flyout create rejects when no planner client is available', async ()
         },
         logger: createSilentLogger()
       }),
-    /Fly-out alerts need a DroqsDB travel planner API endpoint/
+    /Alerts need the DroqsDB alert preview API endpoint/
   );
 });
 
@@ -240,22 +319,34 @@ function createInteractionStub({
   return interaction;
 }
 
-function createDroqsdbClientStub() {
+function createDroqsdbClientStub({
+  itemName = 'Xanax',
+  country = 'Mexico'
+} = {}) {
   return {
     async getItemCountrySnapshot() {
       return {
         item: {
-          itemName: 'Xanax'
+          itemName
         },
-        country: 'Mexico',
+        country,
         countryRow: {
           stock: 0
         }
       };
     },
-    async queryTravelPlanner() {
+    getBotAlertPreviewSettings(overrides = {}) {
       return {
-        runs: []
+        flightType: overrides.flightType || 'private',
+        capacity: overrides.capacity ?? 19,
+        sellTarget: overrides.sellTarget || 'market',
+        marketTax: typeof overrides.marketTax === 'boolean' ? overrides.marketTax : true
+      };
+    },
+    async queryAlertPreview() {
+      return {
+        ok: true,
+        shouldNotifyNow: false
       };
     }
   };

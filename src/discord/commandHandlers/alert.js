@@ -8,6 +8,9 @@ const {
 } = require('../../services/alertStore');
 const { buildInfoEmbed } = require('../../utils/formatters');
 
+const MIN_ALERT_CAPACITY = 1;
+const MAX_ALERT_CAPACITY = 100;
+
 async function execute(interaction, context) {
   assertGuildContext(interaction);
 
@@ -35,15 +38,15 @@ async function createAlert(interaction, context) {
   const mode = normalizeAlertMode(interaction.options.getString('mode', true));
   const repeatMode = normalizeAlertRepeatMode(interaction.options.getString('repeat'));
   const flightType = interaction.options.getString('flight_type') || null;
-  const capacity = interaction.options.getInteger('capacity');
+  const capacity = normalizeCapacityOption(interaction.options.getInteger('capacity'));
   const note = interaction.options.getString('note') || null;
 
   if (context.alertService.countActiveAlertsForUser(interaction.user.id) >= DEFAULT_MAX_ACTIVE_ALERTS_PER_USER) {
     throw new Error(`You already have ${DEFAULT_MAX_ACTIVE_ALERTS_PER_USER} active alerts. Remove one before adding another.`);
   }
 
-  if (mode === ALERT_MODE_FLYOUT && typeof context.droqsdbClient.queryTravelPlanner !== 'function') {
-    throw new Error('Fly-out alerts need a DroqsDB travel planner API endpoint before they can be enabled.');
+  if (typeof context.droqsdbClient.queryAlertPreview !== 'function') {
+    throw new Error('Alerts need the DroqsDB alert preview API endpoint before they can be enabled.');
   }
 
   const snapshot = await context.droqsdbClient.getItemCountrySnapshot(itemInput, countryInput);
@@ -52,6 +55,10 @@ async function createAlert(interaction, context) {
     throw new Error(`${snapshot.item.itemName} is not currently tracked in ${snapshot.country}.`);
   }
 
+  const settings = resolveAlertPreviewSettings(context, {
+    flightType,
+    capacity
+  });
   const alert = context.alertService.createAlert({
     guildId: interaction.guildId,
     channelId: interaction.channelId,
@@ -60,8 +67,10 @@ async function createAlert(interaction, context) {
     country: snapshot.country,
     mode,
     repeatMode,
-    flightType: mode === ALERT_MODE_FLYOUT ? flightType : null,
-    capacity: mode === ALERT_MODE_FLYOUT ? capacity : null,
+    flightType: settings.flightType,
+    capacity: settings.capacity,
+    sellTarget: settings.sellTarget,
+    marketTax: settings.marketTax,
     note,
     lastConditionState:
       repeatMode === ALERT_REPEAT_EVERY_TIME && mode === ALERT_MODE_AVAILABLE
@@ -76,6 +85,8 @@ async function createAlert(interaction, context) {
     itemName: alert.itemName,
     mode: alert.mode,
     repeatMode: alert.repeatMode,
+    flightType: alert.flightType,
+    capacity: alert.capacity,
     userId: alert.userId
   });
 
@@ -89,7 +100,7 @@ async function createAlert(interaction, context) {
           `Repeat: ${formatAlertRepeatMode(alert.repeatMode)}`,
           `Item: ${alert.itemName}`,
           `Country: ${alert.country}`,
-          alert.flightType ? `Flight type: ${alert.flightType}` : null,
+          alert.flightType ? `Flight: ${formatFlightType(alert.flightType)}` : null,
           alert.capacity ? `Capacity: ${alert.capacity}` : null,
           formatAlertCreateSummary(alert)
         ].filter(Boolean).join('\n')
@@ -109,7 +120,7 @@ async function listAlerts(interaction, context) {
       buildInfoEmbed(
         'Your Alerts',
         alerts.length
-          ? alerts.map(formatAlertListLine).join('\n')
+          ? alerts.map((alert) => formatAlertListLine(alert, context)).join('\n')
           : 'You do not have any active alerts in this server.'
       )
     ]
@@ -162,38 +173,77 @@ function formatAlertRepeatMode(repeatMode) {
 
 function formatAlertCreateSummary(alert) {
   if (normalizeAlertRepeatMode(alert.repeatMode) !== ALERT_REPEAT_EVERY_TIME) {
-    return 'I will ping you once in this channel when it fires.';
+    return 'I will DM you once when it fires. Make sure DMs from this server are enabled.';
   }
 
   if (alert.mode === ALERT_MODE_FLYOUT) {
-    return 'I will ping you every time this run becomes ready to fly.';
+    return 'I will DM you every time this run becomes ready to fly. Make sure DMs from this server are enabled.';
   }
 
-  return 'I will ping you every time it comes back in stock.';
+  return 'I will DM you every time it comes back in stock. Make sure DMs from this server are enabled.';
 }
 
-function formatAlertListLine(alert) {
+function formatAlertListLine(alert, context = {}) {
+  const settings = resolveAlertPreviewSettings(context, alert);
   const parts = [
     `#${alert.id}`,
     `${alert.itemName} / ${alert.country}`,
     formatAlertListMode(alert.mode),
-    formatAlertRepeatMode(alert.repeatMode)
+    formatAlertRepeatMode(alert.repeatMode),
+    settings.flightType ? formatFlightType(settings.flightType) : null,
+    settings.capacity ? `Cap ${settings.capacity}` : null
   ];
 
-  if (alert.flightType) {
-    parts.push(alert.flightType);
-  }
-
-  if (alert.capacity) {
-    parts.push(`capacity ${alert.capacity}`);
-  }
-
-  return parts.join(' - ');
+  return parts.filter(Boolean).join(' / ');
 }
 
 function isSnapshotAvailable(snapshot) {
   const stock = Number(snapshot?.countryRow?.stock);
   return Number.isFinite(stock) && stock > 0;
+}
+
+function resolveAlertPreviewSettings(context, overrides = {}) {
+  const source = overrides && typeof overrides === 'object' ? overrides : {};
+
+  if (typeof context.droqsdbClient?.getBotAlertPreviewSettings === 'function') {
+    return context.droqsdbClient.getBotAlertPreviewSettings({
+      flightType: source.flightType || undefined,
+      capacity: source.capacity || undefined,
+      sellTarget: source.sellTarget || undefined,
+      marketTax: typeof source.marketTax === 'boolean' ? source.marketTax : undefined
+    });
+  }
+
+  return {
+    flightType: source.flightType || null,
+    capacity: source.capacity || null,
+    sellTarget: source.sellTarget || null,
+    marketTax: typeof source.marketTax === 'boolean' ? source.marketTax : null
+  };
+}
+
+function normalizeCapacityOption(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (!Number.isInteger(value) || value < MIN_ALERT_CAPACITY || value > MAX_ALERT_CAPACITY) {
+    throw new Error(`Capacity must be a whole number from ${MIN_ALERT_CAPACITY} to ${MAX_ALERT_CAPACITY}.`);
+  }
+
+  return value;
+}
+
+function formatFlightType(value) {
+  const normalized = String(value || '').trim();
+
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 module.exports = {
